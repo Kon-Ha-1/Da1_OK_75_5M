@@ -15,12 +15,10 @@ PASSPHRASE = "Mmoarb2025@"
 TELEGRAM_TOKEN = "7817283052:AAF2fjxxZT8LP-gblBeTbpb0N0-a0C7GLQ8"
 TELEGRAM_CHAT_ID = "5850622014"
 
-
 SYMBOL = os.environ.get("SYMBOL", "DOGE/USDT")
 NUM_ORDERS = int(os.environ.get("NUM_ORDERS", 6))
 SPREAD_PERCENT = float(os.environ.get("SPREAD_PERCENT", 0.6))
 RESERVE = float(os.environ.get("RESERVE", 20))
-
 
 bot = Bot(token=TELEGRAM_TOKEN)
 nest_asyncio.apply()
@@ -55,10 +53,15 @@ async def reset_grid():
     try:
         ex = create_exchange()
 
-        # Huỷ toàn bộ lệnh cũ
+        # Huỷ từng lệnh cũ nếu có
         try:
-            ex.cancel_all_orders(SYMBOL)
-            await send_telegram("🧹 Đã huỷ toàn bộ lệnh cũ.")
+            open_orders = ex.fetch_open_orders(symbol=SYMBOL)
+            for order in open_orders:
+                try:
+                    ex.cancel_order(order['id'], symbol=SYMBOL)
+                except Exception as cancel_err:
+                    await send_telegram(f"⚠️ Huỷ lệnh {order['id']} thất bại: {cancel_err}")
+            await send_telegram("🧹 Đã huỷ toàn bộ lệnh cũ (thủ công).")
         except Exception as e:
             await send_telegram(f"⚠️ Lỗi huỷ lệnh cũ: {str(e)}")
 
