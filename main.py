@@ -15,9 +15,9 @@ PASSPHRASE = "Mmoarb2025@"
 TELEGRAM_TOKEN = "7817283052:AAF2fjxxZT8LP-gblBeTbpb0N0-a0C7GLQ8"
 TELEGRAM_CHAT_ID = "5850622014"
 
-SYMBOL = os.environ.get("SYMBOL", "DOGE/USDT")
+SYMBOL = os.environ.get("SYMBOL", "ARB/USDT")
 NUM_ORDERS = int(os.environ.get("NUM_ORDERS", 6))
-SPREAD_PERCENT = float(os.environ.get("SPREAD_PERCENT", 0.6))
+SPREAD_PERCENT = float(os.environ.get("SPREAD_PERCENT", 0.5))
 RESERVE = float(os.environ.get("RESERVE", 20))
 
 bot = Bot(token=TELEGRAM_TOKEN)
