@@ -1,0 +1,4 @@
+ccxt
+schedule
+nest_asyncio
+python-telegram-bot==20.7
