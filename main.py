@@ -3,6 +3,7 @@ import asyncio
 import schedule
 import nest_asyncio
 import time
+import os
 from datetime import datetime
 from telegram import Bot
 from keep_alive import keep_alive
@@ -13,10 +14,13 @@ API_SECRET = "4B1D25C8F05E12717AD561584B2853E6"
 PASSPHRASE = "Mmoarb2025@"
 TELEGRAM_TOKEN = "7817283052:AAF2fjxxZT8LP-gblBeTbpb0N0-a0C7GLQ8"
 TELEGRAM_CHAT_ID = "5850622014"
-SYMBOL = "DOGE/USDT"
-NUM_ORDERS = 6
-SPREAD_PERCENT = 0.6
-RESERVE = 20
+
+
+SYMBOL = os.environ.get("SYMBOL", "DOGE/USDT")
+NUM_ORDERS = int(os.environ.get("NUM_ORDERS", 6))
+SPREAD_PERCENT = float(os.environ.get("SPREAD_PERCENT", 0.6))
+RESERVE = float(os.environ.get("RESERVE", 20))
+
 
 bot = Bot(token=TELEGRAM_TOKEN)
 nest_asyncio.apply()
