@@ -156,4 +156,5 @@ async def runner():
         schedule.run_pending()
         await asyncio.sleep(1)
 
-asyncio.get_event_loop().run_until_complete(runner())
+if __name__ == "__main__":
+    asyncio.run(runner())
