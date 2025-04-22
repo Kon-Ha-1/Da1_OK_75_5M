@@ -90,10 +90,11 @@ async def reset_grid():
             side = 'buy' if i < 0 else 'sell'
             amount = round(amount_per_order / price, 4)
 
-            if side == 'sell' and coin_balance < amount:
-                await send_telegram(f"⚠️ Bỏ SELL tại {price:.4f}: không đủ {coin}.")
-                continue
-
+            if side == 'sell': 
+                if coin_balance < amount:
+                    await send_telegram(f"⚠️ Bỏ SELL tại {price:.4f}: không đủ {coin}.")
+                    continue
+                coin_balance -= amount
             try:
                 ex.create_limit_order(SYMBOL, side, amount, price)
                 if side == 'buy':
