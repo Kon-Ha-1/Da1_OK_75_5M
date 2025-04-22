@@ -148,6 +148,7 @@ async def runner():
     keep_alive()
     await send_telegram("🤖 Grid Bot khởi động!")
     await log_portfolio()
+    await reset_grid()
     schedule.every().day.at("00:00").do(lambda: asyncio.ensure_future(reset_grid()))
     schedule.every(5).minutes.do(lambda: asyncio.ensure_future(log_portfolio()))
     schedule.every(5).minutes.do(lambda: asyncio.ensure_future(check_price_and_reset()))
