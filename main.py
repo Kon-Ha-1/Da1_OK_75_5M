@@ -157,4 +157,7 @@ async def runner():
         await asyncio.sleep(1)
 
 if __name__ == "__main__":
+    import threading
+    threading.Thread(target=keep_alive).start()
     asyncio.run(runner())
+
