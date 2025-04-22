@@ -5,6 +5,7 @@ import nest_asyncio
 import time
 from datetime import datetime
 from telegram import Bot
+from keep_alive import keep_alive
 
 # === CONFIG ===
 API_KEY = "99d39d59-c05d-4e40-9f2a-3615eac315ea"
@@ -137,6 +138,7 @@ async def check_price_and_reset():
         await reset_grid()
 
 async def runner():
+    keep_alive()
     await send_telegram("🤖 Grid Bot khởi động!")
     await log_portfolio()
     schedule.every().day.at("00:00").do(lambda: asyncio.ensure_future(reset_grid()))
