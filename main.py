@@ -51,6 +51,7 @@ def get_price(exchange):
 async def reset_grid():
     global last_reset_price
     try:
+        print("[RESET] Bắt đầu reset lưới")
         ex = create_exchange()
 
         # Huỷ từng lệnh cũ nếu có
@@ -110,6 +111,7 @@ async def reset_grid():
 async def log_portfolio():
     global last_total_balance
     try:
+        print("[LOG] Kiểm tra tài sản")
         ex = create_exchange()
         balance = ex.fetch_balance()
         coin = SYMBOL.split('/')[0]
@@ -131,6 +133,7 @@ async def log_portfolio():
 
 async def check_price_and_reset():
     global last_reset_price
+    print("[CHECK] Kiểm tra biến động giá")
     ex = create_exchange()
     current_price = get_price(ex)
     if not current_price:
@@ -145,6 +148,8 @@ async def check_price_and_reset():
         await reset_grid()
 
 async def runner():
+    keep_alive()
+    print("🚀 Bot khởi động")
     await send_telegram("🤖 Grid Bot khởi động!")
     await log_portfolio()
     await reset_grid()
@@ -154,11 +159,9 @@ async def runner():
     schedule.every(5).minutes.do(lambda: asyncio.ensure_future(check_price_and_reset()))
 
     while True:
+        print("[LOOP] Tick schedule...")
         schedule.run_pending()
         await asyncio.sleep(1)
-        
+
 if __name__ == "__main__":
-    keep_alive()
     asyncio.run(runner())
-
-
