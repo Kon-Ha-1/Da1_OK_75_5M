@@ -18,7 +18,7 @@ TELEGRAM_CHAT_ID = "5850622014"
 SYMBOL = os.environ.get("SYMBOL", "ARB/USDT")
 NUM_ORDERS = int(os.environ.get("NUM_ORDERS", 6))
 SPREAD_PERCENT = float(os.environ.get("SPREAD_PERCENT", 0.5))
-RESERVE = float(os.environ.get("RESERVE", 20))
+RESERVE = float(os.environ.get("RESERVE", 15))
 
 bot = Bot(token=TELEGRAM_TOKEN)
 nest_asyncio.apply()
