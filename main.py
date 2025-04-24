@@ -1,14 +1,14 @@
 import ccxt
 import asyncio
-import schedule
-import nest_asyncio
-import time
+import pandas as pd
 import json
 import os
 from datetime import datetime
-import pandas as pd
 from telegram import Bot
 from keep_alive import keep_alive
+import schedule
+import nest_asyncio
+import numpy as np
 
 # === CONFIG ===
 API_KEY = "99d39d59-c05d-4e40-9f2a-3615eac315ea"
@@ -18,53 +18,17 @@ TELEGRAM_TOKEN = "7817283052:AAF2fjxxZT8LP-gblBeTbpb0N0-a0C7GLQ8"
 TELEGRAM_CHAT_ID = "5850622014"
 
 SYMBOL = "DOGE/USDT"
-TIMEFRAME = "5m"
-NUM_ORDERS = 8
-SPREAD_PERCENT = 0.25
-RESERVE = 15
-TP_PERCENT = 0.5
-ADJUST_THRESHOLD = 20
-MIN_NOTIONAL = 1.0  # Giá trị tối thiểu mỗi lệnh giao dịch (USDT)
+TIMEFRAME = "15m"
+RSI_PERIOD = 14
+EMA_FAST = 9
+EMA_SLOW = 21
+TP_PERCENT = 0.10
+SL_PERCENT = 0.05
+MIN_NOTIONAL = 1.0
+ORDER_FILE = "swing_orders.json"
 
 bot = Bot(token=TELEGRAM_TOKEN)
 nest_asyncio.apply()
-
-last_total_balance = None
-last_reset_price = None
-FILLED_FILE = "filled_orders.json"
-
-# === Indicator helpers ===
-def get_ohlcv(exchange):
-    try:
-        data = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=100)
-        df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['rsi'] = compute_rsi(df['close'], 14)
-        df['ema_fast'] = df['close'].ewm(span=9, adjust=False).mean()
-        df['ema_slow'] = df['close'].ewm(span=21, adjust=False).mean()
-        return df
-    except Exception as e:
-        print(f"[OHLCV ERROR] {e}")
-        return None
-
-def compute_rsi(series, period):
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.rolling(window=period).mean()
-    avg_loss = loss.rolling(window=period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-def load_filled_orders():
-    if os.path.exists(FILLED_FILE):
-        with open(FILLED_FILE, 'r') as f:
-            return json.load(f)
-    return []
-
-def save_filled_orders(data):
-    with open(FILLED_FILE, 'w') as f:
-        json.dump(data, f)
 
 async def send_telegram(msg):
     try:
@@ -81,97 +45,103 @@ def create_exchange():
         'options': {'defaultType': 'spot'}
     })
 
-def get_price(exchange):
+def compute_rsi(series, period):
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.rolling(window=period).mean()
+    avg_loss = loss.rolling(window=period).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+def is_bullish_engulfing(df):
+    c1, o1, c2, o2 = df['close'].iloc[-2], df['open'].iloc[-2], df['close'].iloc[-1], df['open'].iloc[-1]
+    return c2 > o2 and o1 > c1 and c2 > o1 and o2 < c1
+
+def compute_macd(df):
+    ema12 = df['close'].ewm(span=12, adjust=False).mean()
+    ema26 = df['close'].ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False).mean()
+    df['macd'] = macd
+    df['signal'] = signal
+    return df
+
+def fetch_ohlcv(exchange):
     try:
-        return float(exchange.fetch_ticker(SYMBOL)['last'])
-    except:
+        data = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=100)
+        df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['ema_fast'] = df['close'].ewm(span=EMA_FAST, adjust=False).mean()
+        df['ema_slow'] = df['close'].ewm(span=EMA_SLOW, adjust=False).mean()
+        df['rsi'] = compute_rsi(df['close'], RSI_PERIOD)
+        df = compute_macd(df)
+        return df
+    except Exception as e:
+        print(f"[OHLCV Error] {e}")
         return None
 
-def get_order_book_top(exchange):
-    try:
-        order_book = exchange.fetch_order_book(SYMBOL)
-        top_bid = order_book['bids'][0][0] if order_book['bids'] else None
-        top_ask = order_book['asks'][0][0] if order_book['asks'] else None
-        return top_bid, top_ask
-    except:
-        return None, None
+def load_orders():
+    if os.path.exists(ORDER_FILE):
+        with open(ORDER_FILE, 'r') as f:
+            return json.load(f)
+    return []
 
-async def auto_balance(exchange):
-    balance = exchange.fetch_balance()
-    price = get_price(exchange)
-    coin = SYMBOL.split('/')[0]
-    usdt = float(balance.get('USDT', {}).get('total', 0))
-    coin_amt = float(balance.get(coin, {}).get('total', 0))
-    coin_val = coin_amt * price
+def save_orders(data):
+    with open(ORDER_FILE, 'w') as f:
+        json.dump(data, f)
 
-    if abs(coin_val - usdt) > ADJUST_THRESHOLD:
-        msg = f"⚖️ Cân bằng vốn: USDT={usdt:.2f}, {coin}={coin_amt:.2f} (~{coin_val:.2f})"
-        await send_telegram(msg)
-
-async def check_filled_orders():
+async def strategy():
     ex = create_exchange()
-    filled_orders = load_filled_orders()
-    open_orders = ex.fetch_open_orders(symbol=SYMBOL)
-    open_prices = [float(o['price']) for o in open_orders]
-    price = get_price(ex)
-    coin = SYMBOL.split('/')[0]
-    balance = ex.fetch_balance()
-    coin_amt = float(balance.get(coin, {}).get('total', 0))
-
-    for order in filled_orders:
-        target_price = order['buy_price'] * (1 + TP_PERCENT / 100)
-        if target_price <= price and target_price not in open_prices:
-            try:
-                amount = float(order['amount'])
-                if amount > coin_amt:
-                    continue
-                if amount * target_price < MIN_NOTIONAL:
-                    await send_telegram(
-                        f"⚠️ Bỏ qua SELL {amount} tại {target_price:.4f} vì không đạt min notional.")
-                    continue
-                ex.create_limit_order(SYMBOL, 'sell', amount, round(target_price, 4))
-                await send_telegram(f"💰 Tạo SELL tại {target_price:.4f} từ BUY {order['buy_price']:.4f}")
-            except Exception as e:
-                await send_telegram(f"❌ Lỗi tạo SELL từ BUY {order['buy_price']:.4f}: {str(e)}")
-
-async def log_portfolio():
-    ex = create_exchange()
-    balance = ex.fetch_balance()
-    coin = SYMBOL.split('/')[0]
-    price = get_price(ex)
-    if not price:
+    df = fetch_ohlcv(ex)
+    if df is None:
         return
-    usdt = float(balance.get('USDT', {}).get('total', 0))
-    coin_amt = float(balance.get(coin, {}).get('total', 0))
-    total = usdt + coin_amt * price
-    await send_telegram(f"📊 Tổng tài sản: {total:.2f} USDT (USDT={usdt:.2f}, {coin}={coin_amt:.4f})")
 
-async def detect_new_fills():
-    ex = create_exchange()
-    recent_trades = ex.fetch_my_trades(SYMBOL, limit=20)
-    filled_orders = load_filled_orders()
-    known_prices = [o['buy_price'] for o in filled_orders]
-    for trade in recent_trades:
-        if trade['side'] == 'buy':
-            price = float(trade['price'])
-            amount = float(trade['amount'])
-            if price not in known_prices:
-                filled_orders.append({"buy_price": price, "amount": amount})
-                save_filled_orders(filled_orders)
-                await send_telegram(f"📥 Khớp BUY {amount} tại {price:.4f}")
+    last_row = df.iloc[-1]
+    rsi = last_row['rsi']
+    ema_fast = last_row['ema_fast']
+    ema_slow = last_row['ema_slow']
+    macd = last_row['macd']
+    signal = last_row['signal']
+    price = float(last_row['close'])
 
-async def reset_grid():
-    await send_telegram("🔁 Reset lưới (định kỳ 5 phút)")
+    pattern_ok = is_bullish_engulfing(df)
+    trend_ok = ema_fast > ema_slow
+    rsi_ok = 50 < rsi < 70
+    macd_cross_up = macd > signal and df['macd'].iloc[-2] < df['signal'].iloc[-2]
+
+    open_orders = load_orders()
+    balance = ex.fetch_balance()
+    usdt = float(balance.get('USDT', {}).get('free', 0))
+
+    if not open_orders:
+        if trend_ok and rsi_ok and pattern_ok and macd_cross_up and usdt > 10:
+            amount = round(usdt / price, 2)
+            order = ex.create_market_buy_order(SYMBOL, amount)
+            buy_price = order['average'] or price
+            save_orders([{
+                'buy_price': buy_price,
+                'amount': amount,
+                'timestamp': str(datetime.utcnow())
+            }])
+            await send_telegram(f"🚀 BUY {amount} DOGE tại {buy_price:.4f} (RSI={rsi:.1f}, MACD cross, Engulfing OK)")
+    else:
+        coin = SYMBOL.split('/')[0]
+        doge_amt = float(balance.get(coin, {}).get('free', 0))
+        buy_price = open_orders[0]['buy_price']
+
+        if price >= buy_price * (1 + TP_PERCENT):
+            ex.create_market_sell_order(SYMBOL, doge_amt)
+            await send_telegram(f"💰 TP đạt! SELL {doge_amt} DOGE tại {price:.4f}")
+            save_orders([])
+        elif price <= buy_price * (1 - SL_PERCENT):
+            ex.create_market_sell_order(SYMBOL, doge_amt)
+            await send_telegram(f"🔻 SL! Cắt lỗ {doge_amt} DOGE tại {price:.4f}")
+            save_orders([])
 
 async def runner():
     keep_alive()
-    await send_telegram("🤖 Bot Grid thông minh khởi động!")
-    schedule.every(5).minutes.do(lambda: asyncio.ensure_future(reset_grid()))
-    schedule.every(5).minutes.do(lambda: asyncio.ensure_future(log_portfolio()))
-    schedule.every(2).minutes.do(lambda: asyncio.ensure_future(detect_new_fills()))
-    schedule.every(2).minutes.do(lambda: asyncio.ensure_future(check_filled_orders()))
-    schedule.every(10).minutes.do(lambda: asyncio.ensure_future(auto_balance(create_exchange())))
-
+    await send_telegram("🤖 Bot Swing DOGE Phân tích kỹ thuật đã khởi động!")
+    schedule.every(5).minutes.do(lambda: asyncio.ensure_future(strategy()))
     while True:
         schedule.run_pending()
         await asyncio.sleep(1)
