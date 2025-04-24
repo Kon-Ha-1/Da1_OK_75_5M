@@ -4,11 +4,10 @@ import pandas as pd
 import json
 import os
 from datetime import datetime
-from telegram import Bot
-from keep_alive import keep_alive
 import schedule
 import nest_asyncio
-import numpy as np
+from telegram import Bot
+from keep_alive import keep_alive
 
 # === CONFIG ===
 API_KEY = "99d39d59-c05d-4e40-9f2a-3615eac315ea"
@@ -90,6 +89,35 @@ def save_orders(data):
     with open(ORDER_FILE, 'w') as f:
         json.dump(data, f)
 
+async def check_existing_holdings():
+    ex = create_exchange()
+    balance = ex.fetch_balance()
+    coin = SYMBOL.split('/')[0]
+    price = get_price(ex)
+    if not price:
+        return
+
+    coin_amt = float(balance.get(coin, {}).get('free', 0))
+    if coin_amt * price < MIN_NOTIONAL:
+        return
+
+    buy_price = load_orders()[0]['buy_price'] if load_orders() else price
+
+    if price >= buy_price * (1 + TP_PERCENT):
+        ex.create_market_sell_order(SYMBOL, coin_amt)
+        await send_telegram(f"💰 TP SELL {coin_amt} {coin} tại {price:.4f} (Giá mua: {buy_price:.4f})")
+        save_orders([])
+    elif price <= buy_price * (1 - SL_PERCENT):
+        ex.create_market_sell_order(SYMBOL, coin_amt)
+        await send_telegram(f"🔻 SL SELL {coin_amt} {coin} tại {price:.4f} (Giá mua: {buy_price:.4f})")
+        save_orders([])
+
+def get_price(exchange):
+    try:
+        return float(exchange.fetch_ticker(SYMBOL)['last'])
+    except:
+        return None
+
 async def strategy():
     ex = create_exchange()
     df = fetch_ohlcv(ex)
@@ -120,39 +148,24 @@ async def strategy():
     )
     await send_telegram(msg_debug)
 
-    if not open_orders:
-        if trend_ok and rsi_ok and pattern_ok and macd_cross_up and usdt > 10:
-            amount = round(usdt / price, 2)
-            order = ex.create_market_buy_order(SYMBOL, amount)
-            buy_price = order['average'] or price
-            save_orders([{
-                'buy_price': buy_price,
-                'amount': amount,
-                'timestamp': str(datetime.utcnow())
-            }])
-            await send_telegram(f"🚀 BUY {amount} DOGE tại {buy_price:.4f} (RSI={rsi:.1f}, MACD cross, Engulfing OK)")
-        else:
-            await send_telegram("🤖 Chưa đủ điều kiện vào lệnh. Bot vẫn đang theo dõi thị trường...")
+    if not open_orders and trend_ok and rsi_ok and pattern_ok and macd_cross_up and usdt > 10:
+        amount = round(usdt / price, 2)
+        order = ex.create_market_buy_order(SYMBOL, amount)
+        buy_price = order['average'] or price
+        save_orders([{
+            'buy_price': buy_price,
+            'amount': amount,
+            'timestamp': str(datetime.utcnow())
+        }])
+        await send_telegram(f"🚀 BUY {amount} DOGE tại {buy_price:.4f} (RSI={rsi:.1f}, MACD cross, Engulfing OK)")
     else:
-        coin = SYMBOL.split('/')[0]
-        doge_amt = float(balance.get(coin, {}).get('free', 0))
-        buy_price = open_orders[0]['buy_price']
-
-        if price >= buy_price * (1 + TP_PERCENT):
-            ex.create_market_sell_order(SYMBOL, doge_amt)
-            await send_telegram(f"💰 TP đạt! SELL {doge_amt} DOGE tại {price:.4f}")
-            save_orders([])
-        elif price <= buy_price * (1 - SL_PERCENT):
-            ex.create_market_sell_order(SYMBOL, doge_amt)
-            await send_telegram(f"🔻 SL! Cắt lỗ {doge_amt} DOGE tại {price:.4f}")
-            save_orders([])
-        else:
-            await send_telegram(f"📈 Đang giữ lệnh: {doge_amt} DOGE | Giá hiện tại: {price:.4f}")
+        await send_telegram("🤖 Chưa đủ điều kiện BUY mới. Đang theo dõi...")
 
 async def runner():
     keep_alive()
-    await send_telegram("🤖 Bot Swing DOGE + AI Phân tích kỹ thuật đã khởi động!")
+    await send_telegram("🤖 Bot Swing DOGE + AI phân tích kỹ thuật đã khởi động!")
     schedule.every(5).minutes.do(lambda: asyncio.ensure_future(strategy()))
+    schedule.every(2).minutes.do(lambda: asyncio.ensure_future(check_existing_holdings()))
     while True:
         schedule.run_pending()
         await asyncio.sleep(1)
