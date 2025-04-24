@@ -113,6 +113,13 @@ async def strategy():
     balance = ex.fetch_balance()
     usdt = float(balance.get('USDT', {}).get('free', 0))
 
+    msg_debug = (
+        f"📊 Giá hiện tại: ${price:.4f}\n"
+        f"🎯 Điều kiện vào lệnh: Trend={'✅' if trend_ok else '❌'}, RSI={rsi:.2f} ({'✅' if rsi_ok else '❌'}), "
+        f"MACD cross={'✅' if macd_cross_up else '❌'}, Nến Engulfing={'✅' if pattern_ok else '❌'}"
+    )
+    await send_telegram(msg_debug)
+
     if not open_orders:
         if trend_ok and rsi_ok and pattern_ok and macd_cross_up and usdt > 10:
             amount = round(usdt / price, 2)
