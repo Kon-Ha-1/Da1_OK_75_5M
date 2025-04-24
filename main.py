@@ -6,6 +6,7 @@ import time
 import json
 import os
 from datetime import datetime
+import pandas as pd
 from telegram import Bot
 from keep_alive import keep_alive
 
@@ -17,6 +18,7 @@ TELEGRAM_TOKEN = "7817283052:AAF2fjxxZT8LP-gblBeTbpb0N0-a0C7GLQ8"
 TELEGRAM_CHAT_ID = "5850622014"
 
 SYMBOL = "ARB/USDT"
+TIMEFRAME = "5m"
 NUM_ORDERS = 6
 SPREAD_PERCENT = 0.5
 RESERVE = 15
@@ -28,6 +30,45 @@ nest_asyncio.apply()
 last_total_balance = None
 last_reset_price = None
 FILLED_FILE = "filled_orders.json"
+
+# === Indicator helpers ===
+def get_ohlcv(exchange):
+    try:
+        data = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=100)
+        df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['rsi'] = compute_rsi(df['close'], 14)
+        df['ema_fast'] = df['close'].ewm(span=9, adjust=False).mean()
+        df['ema_slow'] = df['close'].ewm(span=21, adjust=False).mean()
+        df['macd'], df['macd_signal'] = compute_macd(df['close'])
+        df['engulfing'] = detect_engulfing(df)
+        return df
+    except Exception as e:
+        print(f"[OHLCV ERROR] {e}")
+        return None
+
+def compute_rsi(series, period):
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.rolling(window=period).mean()
+    avg_loss = loss.rolling(window=period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def compute_macd(close):
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False).mean()
+    return macd, signal
+
+def detect_engulfing(df):
+    body_prev = df['close'].shift(1) - df['open'].shift(1)
+    body_curr = df['close'] - df['open']
+    bullish = (body_prev < 0) & (body_curr > 0) & (df['close'] > df['open'].shift(1)) & (df['open'] < df['close'].shift(1))
+    bearish = (body_prev > 0) & (body_curr < 0) & (df['close'] < df['open'].shift(1)) & (df['open'] > df['close'].shift(1))
+    return bullish.astype(int) - bearish.astype(int)
 
 def load_filled_orders():
     if os.path.exists(FILLED_FILE):
@@ -67,13 +108,40 @@ async def reset_grid():
     if not price:
         return
 
+    df = get_ohlcv(ex)
+    if df is None:
+        return
+
+    rsi = df['rsi'].iloc[-1]
+    ema_fast = df['ema_fast'].iloc[-1]
+    ema_slow = df['ema_slow'].iloc[-1]
+    macd = df['macd'].iloc[-1]
+    macd_signal = df['macd_signal'].iloc[-1]
+    engulfing = df['engulfing'].iloc[-1]
+
+    if rsi > 70:
+        await send_telegram(f"⛔ RSI = {rsi:.2f} quá cao. Hoãn reset lưới.")
+        return
+    elif rsi < 30:
+        await send_telegram(f"⚠️ RSI = {rsi:.2f} đang quá thấp. Tạm dừng reset lưới để tránh bắt dao rơi.")
+        return
+    elif ema_fast < ema_slow:
+        await send_telegram(f"⚠️ EMA cho tín hiệu giảm. Không nên đặt lệnh mới lúc này.")
+        return
+    elif macd < macd_signal:
+        await send_telegram(f"📉 MACD dưới tín hiệu. Bỏ qua reset lưới.")
+        return
+    elif engulfing == -1:
+        await send_telegram("⚠️ Phát hiện bearish engulfing. Tránh reset.")
+        return
+
     try:
         open_orders = ex.fetch_open_orders(symbol=SYMBOL)
         for order in open_orders:
             ex.cancel_order(order['id'], symbol=SYMBOL)
-        await send_telegram("🧹 Huỷ toàn bộ lệnh cũ thành công.")
+        await send_telegram("🧹 Đã huỷ toàn bộ lệnh cũ thành công.")
     except Exception as e:
-        await send_telegram(f"⚠️ Huỷ lệnh lỗi: {str(e)}")
+        await send_telegram(f"⚠️ Lỗi huỷ lệnh: {str(e)}")
 
     balance = ex.fetch_balance()
     usdt = float(balance.get('USDT', {}).get('free', 0))
@@ -95,13 +163,12 @@ async def reset_grid():
         if side == 'sell' and coin_amt < amount:
             continue
         try:
-            order = ex.create_limit_order(SYMBOL, side, amount, level_price)
+            ex.create_limit_order(SYMBOL, side, amount, level_price)
             await send_telegram(f"✅ Đặt {side.upper()} {amount} tại {level_price:.4f}")
         except Exception as e:
-            await send_telegram(f"❌ Lỗi đặt {side} tại {level_price:.4f}: {str(e)}")
+            await send_telegram(f"⚠️ Lỗi đặt {side.upper()} tại {level_price:.4f}: do không đủ coin trong quỹ")
 
 async def log_portfolio():
-    global last_total_balance
     ex = create_exchange()
     balance = ex.fetch_balance()
     price = get_price(ex)
@@ -113,27 +180,7 @@ async def log_portfolio():
     coin_amt = float(balance.get(coin, {}).get('total', 0))
     total = usdt + coin_amt * price
 
-    if last_total_balance is None or abs(total - last_total_balance) >= 0.01:
-        last_total_balance = total
-        await send_telegram(
-            f"📊 USDT: {usdt:.2f}\n{coin}: {coin_amt:.4f} (~{coin_amt * price:.2f} USDT)\nTổng: {total:.2f} USDT")
-
-async def check_filled_orders():
-    ex = create_exchange()
-    filled_orders = load_filled_orders()
-    open_orders = ex.fetch_open_orders(symbol=SYMBOL)
-    open_prices = [float(o['price']) for o in open_orders]
-    price = get_price(ex)
-
-    for order in filled_orders:
-        target_price = order['buy_price'] * (1 + TP_PERCENT / 100)
-        if target_price <= price and target_price not in open_prices:
-            try:
-                amount = float(order['amount'])
-                ex.create_limit_order(SYMBOL, 'sell', amount, round(target_price, 4))
-                await send_telegram(f"💰 Tạo SELL tại {target_price:.4f} từ BUY {order['buy_price']:.4f}")
-            except Exception as e:
-                await send_telegram(f"❌ Lỗi tạo SELL từ BUY {order['buy_price']:.4f}: {str(e)}")
+    await send_telegram(f"📊 USDT: {usdt:.2f}\n{coin}: {coin_amt:.4f} (~{coin_amt * price:.2f} USDT)\nTổng: {total:.2f} USDT")
 
 async def detect_new_fills():
     ex = create_exchange()
@@ -150,6 +197,23 @@ async def detect_new_fills():
                 save_filled_orders(filled_orders)
                 await send_telegram(f"📥 Khớp BUY {amount} tại {price:.4f}")
 
+async def check_filled_orders():
+    ex = create_exchange()
+    filled_orders = load_filled_orders()
+    open_orders = ex.fetch_open_orders(symbol=SYMBOL)
+    open_prices = [float(o['price']) for o in open_orders]
+    price = get_price(ex)
+
+    for order in filled_orders:
+        target_price = order['buy_price'] * (1 + TP_PERCENT / 100)
+        if target_price <= price and target_price not in open_prices:
+            try:
+                amount = float(order['amount'])
+                ex.create_limit_order(SYMBOL, 'sell', amount, round(target_price, 4))
+                await send_telegram(f"💰 Tạo SELL tại {target_price:.4f} từ BUY {order['buy_price']:.4f}")
+            except Exception as e:
+                await send_telegram(f"⚠️ Lỗi tạo SELL từ BUY {order['buy_price']:.4f} do không đủ coin trong quỹ")
+
 async def runner():
     keep_alive()
     await send_telegram("🤖 Bot MMO Grid Trailing đã khởi động!")
@@ -159,6 +223,7 @@ async def runner():
     schedule.every(5).minutes.do(lambda: asyncio.ensure_future(log_portfolio()))
     schedule.every(2).minutes.do(lambda: asyncio.ensure_future(detect_new_fills()))
     schedule.every(2).minutes.do(lambda: asyncio.ensure_future(check_filled_orders()))
+    schedule.every(5).minutes.do(lambda: asyncio.ensure_future(reset_grid()))
 
     while True:
         schedule.run_pending()
