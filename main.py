@@ -124,6 +124,8 @@ async def strategy():
                 'timestamp': str(datetime.utcnow())
             }])
             await send_telegram(f"🚀 BUY {amount} DOGE tại {buy_price:.4f} (RSI={rsi:.1f}, MACD cross, Engulfing OK)")
+        else:
+            await send_telegram("🤖 Chưa đủ điều kiện vào lệnh. Bot vẫn đang theo dõi thị trường...")
     else:
         coin = SYMBOL.split('/')[0]
         doge_amt = float(balance.get(coin, {}).get('free', 0))
@@ -137,10 +139,12 @@ async def strategy():
             ex.create_market_sell_order(SYMBOL, doge_amt)
             await send_telegram(f"🔻 SL! Cắt lỗ {doge_amt} DOGE tại {price:.4f}")
             save_orders([])
+        else:
+            await send_telegram(f"📈 Đang giữ lệnh: {doge_amt} DOGE | Giá hiện tại: {price:.4f}")
 
 async def runner():
     keep_alive()
-    await send_telegram("🤖 Bot Swing DOGE Phân tích kỹ thuật đã khởi động!")
+    await send_telegram("🤖 Bot Swing DOGE + AI Phân tích kỹ thuật đã khởi động!")
     schedule.every(5).minutes.do(lambda: asyncio.ensure_future(strategy()))
     while True:
         schedule.run_pending()
