@@ -17,12 +17,12 @@ TELEGRAM_TOKEN = "7817283052:AAF2fjxxZT8LP-gblBeTbpb0N0-a0C7GLQ8"
 TELEGRAM_CHAT_ID = "5850622014"
 
 SYMBOL = "DOGE/USDT"
-TIMEFRAME = "15m"
+TIMEFRAME = "5m"
 RSI_PERIOD = 14
 EMA_FAST = 9
 EMA_SLOW = 21
-TP_PERCENT = 0.10
-SL_PERCENT = 0.05
+TP_PERCENT = 0.08
+SL_PERCENT = 0.04
 MIN_NOTIONAL = 1.0
 ORDER_FILE = "swing_orders.json"
 
@@ -53,9 +53,12 @@ def compute_rsi(series, period):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def is_bullish_engulfing(df):
+def is_bullish_pattern(df):
     c1, o1, c2, o2 = df['close'].iloc[-2], df['open'].iloc[-2], df['close'].iloc[-1], df['open'].iloc[-1]
-    return c2 > o2 and o1 > c1 and c2 > o1 and o2 < c1
+    is_engulfing = c2 > o2 and o1 > c1 and c2 > o1 and o2 < c1
+    is_pinbar = abs(o2 - c2) / (df['high'].iloc[-1] - df['low'].iloc[-1]) < 0.3
+    is_doji = abs(c2 - o2) <= 0.001
+    return is_engulfing or is_pinbar or is_doji
 
 def compute_macd(df):
     ema12 = df['close'].ewm(span=12, adjust=False).mean()
@@ -89,6 +92,12 @@ def save_orders(data):
     with open(ORDER_FILE, 'w') as f:
         json.dump(data, f)
 
+def get_price(exchange):
+    try:
+        return float(exchange.fetch_ticker(SYMBOL)['last'])
+    except:
+        return None
+
 async def check_existing_holdings():
     ex = create_exchange()
     balance = ex.fetch_balance()
@@ -112,12 +121,6 @@ async def check_existing_holdings():
         await send_telegram(f"🔻 SL SELL {coin_amt} {coin} tại {price:.4f} (Giá mua: {buy_price:.4f})")
         save_orders([])
 
-def get_price(exchange):
-    try:
-        return float(exchange.fetch_ticker(SYMBOL)['last'])
-    except:
-        return None
-
 async def strategy():
     ex = create_exchange()
     df = fetch_ohlcv(ex)
@@ -132,10 +135,10 @@ async def strategy():
     signal = last_row['signal']
     price = float(last_row['close'])
 
-    pattern_ok = is_bullish_engulfing(df)
-    trend_ok = ema_fast > ema_slow
-    rsi_ok = 50 < rsi < 70
-    macd_cross_up = macd > signal and df['macd'].iloc[-2] < df['signal'].iloc[-2]
+    pattern_ok = is_bullish_pattern(df)
+    trend_ok = ema_fast > ema_slow or (df['ema_fast'].iloc[-2] < df['ema_slow'].iloc[-2] and ema_fast > ema_slow)
+    rsi_ok = 45 < rsi < 75
+    macd_ok = macd > signal or abs(macd - signal) < 0.002
 
     open_orders = load_orders()
     balance = ex.fetch_balance()
@@ -143,12 +146,13 @@ async def strategy():
 
     msg_debug = (
         f"📊 Giá hiện tại: ${price:.4f}\n"
-        f"🎯 Điều kiện vào lệnh: Trend={'✅' if trend_ok else '❌'}, RSI={rsi:.2f} ({'✅' if rsi_ok else '❌'}), "
-        f"MACD cross={'✅' if macd_cross_up else '❌'}, Nến Engulfing={'✅' if pattern_ok else '❌'}"
+        f"🎯 Trend={'✅' if trend_ok else '❌'}, RSI={rsi:.2f} ({'✅' if rsi_ok else '❌'}), MACD={'✅' if macd_ok else '❌'}, Nến={'✅' if pattern_ok else '❌'}"
     )
     await send_telegram(msg_debug)
 
-    if not open_orders and trend_ok and rsi_ok and pattern_ok and macd_cross_up and usdt > 10:
+    valid_signals = sum([trend_ok, rsi_ok, macd_ok, pattern_ok])
+
+    if not open_orders and valid_signals >= 3 and usdt > 10:
         amount = round(usdt / price, 2)
         order = ex.create_market_buy_order(SYMBOL, amount)
         buy_price = order['average'] or price
@@ -157,9 +161,9 @@ async def strategy():
             'amount': amount,
             'timestamp': str(datetime.utcnow())
         }])
-        await send_telegram(f"🚀 BUY {amount} DOGE tại {buy_price:.4f} (RSI={rsi:.1f}, MACD cross, Engulfing OK)")
-    else:
-        await send_telegram("🤖 Chưa đủ điều kiện BUY mới. Đang theo dõi...")
+        await send_telegram(f"🚀 BUY {amount} DOGE tại {buy_price:.4f} (Tín hiệu đạt {valid_signals}/4)")
+    elif not open_orders:
+        await send_telegram(f"🤖 Tín hiệu chưa đủ mạnh ({valid_signals}/4). Đang theo dõi...")
 
 async def runner():
     keep_alive()
