@@ -74,14 +74,10 @@ async def analyze_symbol(symbol):
         near = "☀️ Gần đỉnh ngày"
 
     msg = (
-        f"📊 [{symbol}]
-"
-        f"Giá hiện tại: ${current_price:.4f}
-"
-        f"Biến động hôm nay: {change_today:.2f}%
-"
-        f"6h gần nhất: Min={min_6h:.4f}, Max={max_6h:.4f}
-"
+        f"📊 [{symbol}]\n"
+        f"Giá hiện tại: ${current_price:.4f}\n"
+        f"Biến động hôm nay: {change_today:.2f}%\n"
+        f"6h gần nhất: Min={min_6h:.4f}, Max={max_6h:.4f}\n"
         f"{near}"
     )
     await send_telegram(msg)
