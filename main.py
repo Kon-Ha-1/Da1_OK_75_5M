@@ -41,7 +41,7 @@ def fetch_ohlcv(exchange, symbol):
     try:
         data = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=100)
         df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+       df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms').dt.tz_localize('Asia/Ho_Chi_Minh')
         df['ema_fast'] = df['close'].ewm(span=9, adjust=False).mean()
         df['ema_slow'] = df['close'].ewm(span=21, adjust=False).mean()
         delta = df['close'].diff()
