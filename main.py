@@ -3,7 +3,7 @@ import asyncio
 import pandas as pd
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import schedule
 import nest_asyncio
 from telegram import Bot
@@ -41,7 +41,7 @@ def fetch_ohlcv(exchange, symbol):
     try:
         data = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=100)
         df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms').dt.tz_localize('Asia/Ho_Chi_Minh')
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms').dt.tz_localize('UTC').dt.tz_convert('Asia/Ho_Chi_Minh')
         df['ema_fast'] = df['close'].ewm(span=9, adjust=False).mean()
         df['ema_slow'] = df['close'].ewm(span=21, adjust=False).mean()
         delta = df['close'].diff()
@@ -66,8 +66,8 @@ async def analyze_symbol(symbol):
     if df is None:
         return
 
-    today = pd.Timestamp.now(tz="Asia/Ho_Chi_Minh").normalize()
-    now = pd.Timestamp.now(tz="Asia/Ho_Chi_Minh")
+    now = pd.Timestamp.now(tz='Asia/Ho_Chi_Minh')
+    today = now.normalize()
 
     last_hours_df = df[df['timestamp'] > now - pd.Timedelta(hours=6)]
     today_df = df[df['timestamp'] > today]
