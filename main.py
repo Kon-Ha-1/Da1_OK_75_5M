@@ -7,7 +7,6 @@ from datetime import datetime, timezone, timedelta
 import schedule
 import nest_asyncio
 from telegram import Bot
-from telegram.request import HTTPXRequest
 from keep_alive import keep_alive
 
 # === CONFIG ===
@@ -20,8 +19,7 @@ TELEGRAM_CHAT_ID = "5850622014"
 SYMBOLS = ["DOGE/USDT", "ARB/USDT", "MAGIC/USDT"]
 TIMEFRAME = "15m"
 
-request = HTTPXRequest(pool_size=10, connect_timeout=10.0, read_timeout=10.0)
-bot = Bot(token=TELEGRAM_TOKEN, request=request)
+bot = Bot(token=TELEGRAM_TOKEN)
 nest_asyncio.apply()
 
 async def send_telegram(msg):
