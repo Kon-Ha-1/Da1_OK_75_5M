@@ -41,7 +41,7 @@ def fetch_ohlcv(exchange, symbol):
     try:
         data = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=100)
         df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms').dt.tz_localize('UTC').dt.tz_convert('Asia/Ho_Chi_Minh')
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True).dt.tz_convert('Asia/Ho_Chi_Minh')
         df['ema_fast'] = df['close'].ewm(span=9, adjust=False).mean()
         df['ema_slow'] = df['close'].ewm(span=21, adjust=False).mean()
         delta = df['close'].diff()
@@ -97,9 +97,30 @@ async def analyze_symbol(symbol):
     signal = df['signal'].iloc[-1]
     macd_cross_up = macd > signal and df['macd'].iloc[-2] < df['signal'].iloc[-2]
 
-    suggest = "❌ CHỜ"
-    if trend_ok and rsi_ok and macd_cross_up and near == "🌑 Gần đáy ngày":
+    recent_slopes = df['close'].diff().tail(6)
+    avg_slope = recent_slopes.mean()
+    if avg_slope > 0:
+        predict = "🚀 Dự đoán: giá sắp tăng"
+    elif avg_slope < 0:
+        predict = "🔻 Dự đoán: giá sắp giảm"
+    else:
+        predict = "⏳ Dự đoán: đi ngang"
+
+    score = 0
+    if trend_ok: score += 1
+    if rsi_ok: score += 1
+    if macd_cross_up: score += 1
+    if near == "🌑 Gần đáy ngày": score += 1
+
+    if score == 4:
+        probability = "🔵 Xác suất cao: 90-95%"
         suggest = "✅ GỢI Ý MUA"
+    elif score == 3:
+        probability = "🟡 Xác suất vừa: 75-80%"
+        suggest = "🕒 CÂN NHẮC"
+    else:
+        probability = "🔴 Xác suất thấp: <60%"
+        suggest = "❌ CHỜ"
 
     msg = (
         f"📈 Coin: {symbol}\n"
@@ -109,14 +130,16 @@ async def analyze_symbol(symbol):
         f"- EMA trend: {'Bullish ✅' if trend_ok else 'Bearish ❌'}\n"
         f"- RSI: {rsi:.2f} {'✅' if rsi_ok else '❌'}\n"
         f"- MACD: {'✅ Cắt lên' if macd_cross_up else '❌ Chưa cắt lên'}\n"
-        f"- {near}\n"
+        f"- {near if near else 'Giá trung bình ngày'}\n"
+        f"- {predict}\n"
+        f"- {probability}\n"
         f"👉 {suggest}"
     )
     await send_telegram(msg)
 
 async def runner():
     keep_alive()
-    await send_telegram("🤖 Bot phân tích đa coin khởi động!")
+    await send_telegram("🤖 Bot phân tích đa coin + dự đoán giá khởi động!")
     for sym in SYMBOLS:
         schedule.every(1).minutes.do(lambda s=sym: asyncio.ensure_future(analyze_symbol(s)))
 
