@@ -118,8 +118,7 @@ async def analyze_all_symbols():
         if near == "🌑 Gần đáy ngày": score += 1
 
         if score == 4:
-            probability = "🔵 Xác suất cao: 90-95% 
-            probability = "🟡 Xác suất vừa: 75-80% @hakutecucxuc"
+            probability = "🔵 Xác suất cao: 90-95% @hakutecucxuc"
             suggest = "✅ GỢI Ý MUA"
         elif score == 3:
             probability = "🟡 Xác suất vừa: 75-80% @hakutecucxuc"
