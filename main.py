@@ -54,7 +54,7 @@ def fetch_ohlcv(exchange, symbol):
 
 async def analyze_and_trade():
     ex = create_exchange()
-    summary = "\n📊 PHÂN TÍCH + QUẢN LÝ LỆNH:\n"
+    summary = "\n📊 PHÂN TÍCH + QUẢN LÝ LỆNH :\n"
     
     for symbol in SYMBOLS:
         df = fetch_ohlcv(ex, symbol)
