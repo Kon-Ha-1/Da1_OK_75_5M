@@ -8,6 +8,8 @@ import schedule
 import nest_asyncio
 from telegram import Bot
 from keep_alive import keep_alive
+import pytz
+
 
 # === CONFIG ===
 API_KEY = "99d39d59-c05d-4e40-9f2a-3615eac315ea"
@@ -53,8 +55,13 @@ async def analyze_symbol(symbol):
     if df is None:
         return
 
-    today = pd.Timestamp.utcnow().normalize()
-    now = pd.Timestamp.utcnow()
+    vn_tz = pytz.timezone("Asia/Ho_Chi_Minh")  # 👈 Lấy timezone Việt Nam
+    now = pd.Timestamp.utcnow().astimezone(vn_tz)  # 👈 Chuyển UTC sang VN
+    today = now.normalize()
+
+    # Do df['timestamp'] đang tz-naive => cần làm nó cũng thành VN timezone
+    df['timestamp'] = df['timestamp'].dt.tz_localize('UTC').dt.tz_convert('Asia/Ho_Chi_Minh')
+
     last_hours_df = df[df['timestamp'] > now - pd.Timedelta(hours=6)]
     today_df = df[df['timestamp'] > today]
 
@@ -66,7 +73,6 @@ async def analyze_symbol(symbol):
     open_today = today_df['open'].iloc[0] if not today_df.empty else df['open'].iloc[0]
     change_today = (current_price - open_today) / open_today * 100 if open_today else 0
 
-    # Xác định vùng giá hiện tại
     near = ""
     if current_price <= min_today * 1.01:
         near = "🌑 Gần đáy ngày"
