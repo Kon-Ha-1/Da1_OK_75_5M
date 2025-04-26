@@ -99,12 +99,13 @@ async def analyze_symbol(symbol):
 
     recent_slopes = df['close'].diff().tail(6)
     avg_slope = recent_slopes.mean()
-    if avg_slope > 0:
-        predict = "🚀 Dự đoán: giá sắp tăng"
-    elif avg_slope < 0:
-        predict = "🔻 Dự đoán: giá sắp giảm"
+
+    if avg_slope > 0.0001:
+        predict = "🚀 Dự đoán: giá TĂNG mạnh trong 15-30p"
+    elif avg_slope < -0.0001:
+        predict = "🔻 Dự đoán: giá GIẢM mạnh trong 15-30p"
     else:
-        predict = "⏳ Dự đoán: đi ngang"
+        predict = "⏳ Dự đoán: Sideway nhẹ"
 
     score = 0
     if trend_ok: score += 1
@@ -113,14 +114,14 @@ async def analyze_symbol(symbol):
     if near == "🌑 Gần đáy ngày": score += 1
 
     if score == 4:
-        probability = "🔵 Xác suất cao: 90-95% @hakutecucxuc"
-        suggest = "✅ GỢI Ý MUA"
+        probability = "🔵 Xác suất cao: 90-95%"
+        suggest = "✅ GỢI Ý MUA hoặc chờ breakout"
     elif score == 3:
-        probability = "🟡 Xác suất vừa: 75-80% @hakutecucxuc"
-        suggest = "🕒 CÂN NHẮC"
+        probability = "🟡 Xác suất vừa: 75-80%"
+        suggest = "🕒 CÂN NHẮC vào lệnh nhỏ"
     else:
         probability = "🔴 Xác suất thấp: <60%"
-        suggest = "❌ CHỜ"
+        suggest = "❌ Tạm thời không vào"
 
     msg = (
         f"📈 Coin: {symbol}\n"
@@ -139,7 +140,7 @@ async def analyze_symbol(symbol):
 
 async def runner():
     keep_alive()
-    await send_telegram("🤖 Bot phân tích đa coin + dự đoán giá khởi động!")
+    await send_telegram("🤖 Bot phân tích đa coin + dự báo swing trade đã khởi động!")
     for sym in SYMBOLS:
         schedule.every(1).minutes.do(lambda s=sym: asyncio.ensure_future(analyze_symbol(s)))
 
