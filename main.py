@@ -145,7 +145,7 @@ async def analyze_all_symbols():
 
 async def runner():
     keep_alive()
-    await send_telegram("🤖 Bot phân tích đa coin (Gộp tin nhắn) đã khởi động!")
+    await send_telegram("🤖 Bot phân tích đa coin đã khởi động!")
     schedule.every(1).minutes.do(lambda: asyncio.ensure_future(analyze_all_symbols()))
 
     while True:
