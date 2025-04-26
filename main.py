@@ -8,8 +8,6 @@ import schedule
 import nest_asyncio
 from telegram import Bot
 from keep_alive import keep_alive
-import pytz
-
 
 # === CONFIG ===
 API_KEY = "99d39d59-c05d-4e40-9f2a-3615eac315ea"
@@ -44,6 +42,19 @@ def fetch_ohlcv(exchange, symbol):
         data = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=100)
         df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df['ema_fast'] = df['close'].ewm(span=9, adjust=False).mean()
+        df['ema_slow'] = df['close'].ewm(span=21, adjust=False).mean()
+        delta = df['close'].diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = -delta.where(delta < 0, 0.0)
+        avg_gain = gain.rolling(window=14).mean()
+        avg_loss = loss.rolling(window=14).mean()
+        rs = avg_gain / avg_loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+        ema12 = df['close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['close'].ewm(span=26, adjust=False).mean()
+        df['macd'] = ema12 - ema26
+        df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
         return df
     except Exception as e:
         print(f"[OHLCV Error] {symbol}: {e}")
@@ -55,12 +66,8 @@ async def analyze_symbol(symbol):
     if df is None:
         return
 
-    vn_tz = pytz.timezone("Asia/Ho_Chi_Minh")  # 👈 Lấy timezone Việt Nam
-    now = pd.Timestamp.utcnow().astimezone(vn_tz)  # 👈 Chuyển UTC sang VN
-    today = now.normalize()
-
-    # Do df['timestamp'] đang tz-naive => cần làm nó cũng thành VN timezone
-    df['timestamp'] = df['timestamp'].dt.tz_localize('UTC').dt.tz_convert('Asia/Ho_Chi_Minh')
+    today = pd.Timestamp.now(tz="Asia/Ho_Chi_Minh").normalize()
+    now = pd.Timestamp.now(tz="Asia/Ho_Chi_Minh")
 
     last_hours_df = df[df['timestamp'] > now - pd.Timedelta(hours=6)]
     today_df = df[df['timestamp'] > today]
@@ -79,12 +86,31 @@ async def analyze_symbol(symbol):
     elif current_price >= max_today * 0.99:
         near = "☀️ Gần đỉnh ngày"
 
+    ema_fast = df['ema_fast'].iloc[-1]
+    ema_slow = df['ema_slow'].iloc[-1]
+    trend_ok = ema_fast > ema_slow
+
+    rsi = df['rsi'].iloc[-1]
+    rsi_ok = 45 <= rsi <= 75
+
+    macd = df['macd'].iloc[-1]
+    signal = df['signal'].iloc[-1]
+    macd_cross_up = macd > signal and df['macd'].iloc[-2] < df['signal'].iloc[-2]
+
+    suggest = "❌ CHỜ"
+    if trend_ok and rsi_ok and macd_cross_up and near == "🌑 Gần đáy ngày":
+        suggest = "✅ GỢI Ý MUA"
+
     msg = (
-        f"📊 [{symbol}]\n"
-        f"Giá hiện tại: ${current_price:.4f}\n"
-        f"Biến động hôm nay: {change_today:.2f}%\n"
-        f"6h gần nhất: Min={min_6h:.4f}, Max={max_6h:.4f}\n"
-        f"{near}"
+        f"📈 Coin: {symbol}\n"
+        f"- Giá hiện tại: ${current_price:.4f}\n"
+        f"- Biến động hôm nay: {change_today:.2f}%\n"
+        f"- 6h gần nhất: Min={min_6h:.4f}, Max={max_6h:.4f}\n"
+        f"- EMA trend: {'Bullish ✅' if trend_ok else 'Bearish ❌'}\n"
+        f"- RSI: {rsi:.2f} {'✅' if rsi_ok else '❌'}\n"
+        f"- MACD: {'✅ Cắt lên' if macd_cross_up else '❌ Chưa cắt lên'}\n"
+        f"- {near}\n"
+        f"👉 {suggest}"
     )
     await send_telegram(msg)
 
