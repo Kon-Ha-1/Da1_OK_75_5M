@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 import schedule
 import nest_asyncio
 from telegram import Bot
+from telegram.request import HTTPXRequest
 from keep_alive import keep_alive
 
 # === CONFIG ===
@@ -19,7 +20,8 @@ TELEGRAM_CHAT_ID = "5850622014"
 SYMBOLS = ["DOGE/USDT", "ARB/USDT", "MAGIC/USDT"]
 TIMEFRAME = "15m"
 
-bot = Bot(token=TELEGRAM_TOKEN)
+request = HTTPXRequest(pool_size=10, connect_timeout=10.0, read_timeout=10.0)
+bot = Bot(token=TELEGRAM_TOKEN, request=request)
 nest_asyncio.apply()
 
 async def send_telegram(msg):
@@ -60,89 +62,92 @@ def fetch_ohlcv(exchange, symbol):
         print(f"[OHLCV Error] {symbol}: {e}")
         return None
 
-async def analyze_symbol(symbol):
+async def analyze_all_symbols():
     ex = create_exchange()
-    df = fetch_ohlcv(ex, symbol)
-    if df is None:
-        return
+    full_report = "\n📊 PHÂN TÍCH TỔNG HỢP:\n"
 
-    now = pd.Timestamp.now(tz='Asia/Ho_Chi_Minh')
-    today = now.normalize()
+    for symbol in SYMBOLS:
+        df = fetch_ohlcv(ex, symbol)
+        if df is None:
+            continue
 
-    last_hours_df = df[df['timestamp'] > now - pd.Timedelta(hours=6)]
-    today_df = df[df['timestamp'] > today]
+        now = pd.Timestamp.now(tz='Asia/Ho_Chi_Minh')
+        today = now.normalize()
 
-    current_price = df['close'].iloc[-1]
-    min_today = today_df['low'].min()
-    max_today = today_df['high'].max()
-    min_6h = last_hours_df['low'].min()
-    max_6h = last_hours_df['high'].max()
-    open_today = today_df['open'].iloc[0] if not today_df.empty else df['open'].iloc[0]
-    change_today = (current_price - open_today) / open_today * 100 if open_today else 0
+        last_hours_df = df[df['timestamp'] > now - pd.Timedelta(hours=6)]
+        today_df = df[df['timestamp'] > today]
 
-    near = ""
-    if current_price <= min_today * 1.01:
-        near = "🌑 Gần đáy ngày"
-    elif current_price >= max_today * 0.99:
-        near = "☀️ Gần đỉnh ngày"
+        current_price = df['close'].iloc[-1]
+        min_today = today_df['low'].min()
+        max_today = today_df['high'].max()
+        min_6h = last_hours_df['low'].min()
+        max_6h = last_hours_df['high'].max()
+        open_today = today_df['open'].iloc[0] if not today_df.empty else df['open'].iloc[0]
+        change_today = (current_price - open_today) / open_today * 100 if open_today else 0
 
-    ema_fast = df['ema_fast'].iloc[-1]
-    ema_slow = df['ema_slow'].iloc[-1]
-    trend_ok = ema_fast > ema_slow
+        near = ""
+        if current_price <= min_today * 1.01:
+            near = "🌑 Gần đáy ngày"
+        elif current_price >= max_today * 0.99:
+            near = "☀️ Gần đỉnh ngày"
 
-    rsi = df['rsi'].iloc[-1]
-    rsi_ok = 45 <= rsi <= 75
+        ema_fast = df['ema_fast'].iloc[-1]
+        ema_slow = df['ema_slow'].iloc[-1]
+        trend_ok = ema_fast > ema_slow
 
-    macd = df['macd'].iloc[-1]
-    signal = df['signal'].iloc[-1]
-    macd_cross_up = macd > signal and df['macd'].iloc[-2] < df['signal'].iloc[-2]
+        rsi = df['rsi'].iloc[-1]
+        rsi_ok = 45 <= rsi <= 75
 
-    recent_slopes = df['close'].diff().tail(6)
-    avg_slope = recent_slopes.mean()
+        macd = df['macd'].iloc[-1]
+        signal = df['signal'].iloc[-1]
+        macd_cross_up = macd > signal and df['macd'].iloc[-2] < df['signal'].iloc[-2]
 
-    if avg_slope > 0.0001:
-        predict = "🚀 Dự đoán: giá TĂNG mạnh trong 15-30p"
-    elif avg_slope < -0.0001:
-        predict = "🔻 Dự đoán: giá GIẢM mạnh trong 15-30p"
-    else:
-        predict = "⏳ Dự đoán: Sideway nhẹ"
+        recent_slopes = df['close'].diff().tail(6)
+        avg_slope = recent_slopes.mean()
+        if avg_slope > 0:
+            predict = "🚀 Dự đoán: giá sắp tăng"
+        elif avg_slope < 0:
+            predict = "🔻 Dự đoán: giá sắp giảm"
+        else:
+            predict = "⏳ Dự đoán: đi ngang"
 
-    score = 0
-    if trend_ok: score += 1
-    if rsi_ok: score += 1
-    if macd_cross_up: score += 1
-    if near == "🌑 Gần đáy ngày": score += 1
+        score = 0
+        if trend_ok: score += 1
+        if rsi_ok: score += 1
+        if macd_cross_up: score += 1
+        if near == "🌑 Gần đáy ngày": score += 1
 
-    if score == 4:
-        probability = "🔵 Xác suất cao: 90-95%"
-        suggest = "✅ GỢI Ý MUA hoặc chờ breakout"
-    elif score == 3:
-        probability = "🟡 Xác suất vừa: 75-80%"
-        suggest = "🕒 CÂN NHẮC vào lệnh nhỏ"
-    else:
-        probability = "🔴 Xác suất thấp: <60%"
-        suggest = "❌ Tạm thời không vào"
+        if score == 4:
+            probability = "🔵 Xác suất cao: 90-95% 
+            probability = "🟡 Xác suất vừa: 75-80% @hakutecucxuc"
+            suggest = "✅ GỢI Ý MUA"
+        elif score == 3:
+            probability = "🟡 Xác suất vừa: 75-80% @hakutecucxuc"
+            suggest = "🕒 CÂN NHẮC"
+        else:
+            probability = "🔴 Xác suất thấp: <60%"
+            suggest = "❌ CHỜ"
 
-    msg = (
-        f"📈 Coin: {symbol}\n"
-        f"- Giá hiện tại: ${current_price:.4f}\n"
-        f"- Biến động hôm nay: {change_today:.2f}%\n"
-        f"- 6h gần nhất: Min={min_6h:.4f}, Max={max_6h:.4f}\n"
-        f"- EMA trend: {'Bullish ✅' if trend_ok else 'Bearish ❌'}\n"
-        f"- RSI: {rsi:.2f} {'✅' if rsi_ok else '❌'}\n"
-        f"- MACD: {'✅ Cắt lên' if macd_cross_up else '❌ Chưa cắt lên'}\n"
-        f"- {near if near else 'Giá trung bình ngày'}\n"
-        f"- {predict}\n"
-        f"- {probability}\n"
-        f"👉 {suggest}"
-    )
-    await send_telegram(msg)
+        full_report += (
+            f"\n🪙 {symbol}\n"
+            f"- Giá: ${current_price:.4f}\n"
+            f"- Biến động hôm nay: {change_today:.2f}%\n"
+            f"- 6h: Min={min_6h:.4f}, Max={max_6h:.4f}\n"
+            f"- EMA: {'Bullish ✅' if trend_ok else 'Bearish ❌'}\n"
+            f"- RSI: {rsi:.2f} {'✅' if rsi_ok else '❌'}\n"
+            f"- MACD: {'✅ Cắt lên' if macd_cross_up else '❌ Chưa cắt lên'}\n"
+            f"- {near if near else 'Giá trung bình ngày'}\n"
+            f"- {predict}\n"
+            f"- {probability}\n"
+            f"👉 {suggest}\n"
+        )
+
+    await send_telegram(full_report)
 
 async def runner():
     keep_alive()
-    await send_telegram("🤖 Bot phân tích đa coin + dự báo swing trade đã khởi động!")
-    for sym in SYMBOLS:
-        schedule.every(1).minutes.do(lambda s=sym: asyncio.ensure_future(analyze_symbol(s)))
+    await send_telegram("🤖 Bot phân tích đa coin đã khởi động!")
+    schedule.every(1).minutes.do(lambda: asyncio.ensure_future(analyze_all_symbols()))
 
     while True:
         schedule.run_pending()
