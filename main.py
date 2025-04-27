@@ -1,7 +1,6 @@
-import ccxt
+import ccxt.async_support as ccxt
 import asyncio
 import pandas as pd
-import os
 from datetime import datetime, timezone, timedelta
 import schedule
 import nest_asyncio
@@ -15,17 +14,17 @@ PASSPHRASE = "Mmoarb2025@"
 TELEGRAM_TOKEN = "7817283052:AAF2fjxxZT8LP-gblBeTbpb0N0-a0C7GLQ8"
 TELEGRAM_CHAT_ID = "5850622014"
 
-SYMBOL = "DOGE/USDT"
-TIMEFRAME = "5m"
-
+SYMBOLS = ["DOGE/USDT"]
 bot = Bot(token=TELEGRAM_TOKEN)
 nest_asyncio.apply()
 
+last_total_value_usd = None  # Lưu tổng tài sản USD để tránh báo lặp
+daily_start_capital_usd = 0.0  # Tổng tài sản USD tại 21:00
+last_day = None  # Ngày cuối cùng cập nhật
+
 async def send_telegram(msg):
-    try:
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg)
-    except Exception as e:
-        print(f"[Telegram Error] {e}")
+    vn_time = datetime.now(timezone(timedelta(hours=7))).strftime('%H:%M:%S %d/%m/%Y')
+    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"{msg}\n⏰ Giờ VN: {vn_time}")
 
 def create_exchange():
     return ccxt.okx({
@@ -36,23 +35,38 @@ def create_exchange():
         'options': {'defaultType': 'spot'}
     })
 
-def fetch_ohlcv(exchange):
+async def fetch_usdt_usd_rate(exchange):
     try:
-        data = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=100)
+        ticker = await exchange.fetch_ticker("USDT/USD")
+        return float(ticker['last'])
+    except Exception:
+        return 1.0  # Mặc định 1:1 nếu lỗi
+
+async def fetch_ohlcv(exchange, symbol, timeframe, limit=100):
+    try:
+        data = await exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=100)
         df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True).dt.tz_convert('Asia/Ho_Chi_Minh')
+        
         df['ema_fast'] = df['close'].ewm(span=5, adjust=False).mean()
         df['ema_slow'] = df['close'].ewm(span=12, adjust=False).mean()
-        df['ema_big'] = df['close'].ewm(span=30, adjust=False).mean()
         df['rsi14'] = compute_rsi(df['close'], 14)
+        df['resistance'] = df['high'].rolling(20).max()
         df['volume_ma'] = df['volume'].rolling(10).mean()
+        
         ema12 = df['close'].ewm(span=12, adjust=False).mean()
         ema26 = df['close'].ewm(span=26, adjust=False).mean()
         df['macd'] = ema12 - ema26
         df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+        
+        df['tr'] = pd.concat([df['high'] - df['low'], 
+                              (df['high'] - df['close'].shift()).abs(), 
+                              (df['low'] - df['close'].shift()).abs()], axis=1).max(axis=1)
+        df['atr'] = df['tr'].rolling(14).mean()
+        
         return df
     except Exception as e:
-        print(f"[OHLCV Error] {e}")
+        await send_telegram(f"❌ [OHLCV Error] {symbol} ({timeframe}): {e}")
         return None
 
 def compute_rsi(series, period):
@@ -63,75 +77,99 @@ def compute_rsi(series, period):
     avg_loss = loss.rolling(window=period).mean()
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
-    
-async def log_portfolio():
-    try:
-        ex = create_exchange()
-        balance = ex.fetch_balance()
-        usdt = float(balance['USDT']['total'])
-        doge = float(balance['DOGE']['total'])
-        price = (await ex.fetch_ticker(SYMBOL))['last']
-        total_value = usdt + doge * price
 
-        await send_telegram(
-            f"📊 Báo cáo tài sản:\n"
-            f"- USDT: {usdt:.2f}\n"
-            f"- DOGE: {doge:.0f} (~{doge * price:.2f} USDT)\n"
-            f"- Tổng tài sản: {total_value:.2f} USDT 💰"
-        )
-    except Exception as e:
-        await send_telegram(f"❌ Lỗi log_portfolio: {str(e)}")
+def is_strong_uptrend(df):
+    last_candle = df.iloc[-1]
+    return last_candle['ema_fast'] > last_candle['ema_slow']
 
-async def analyze_and_predict():
-    ex = create_exchange()
-    df = fetch_ohlcv(ex)
-    if df is None:
-        return
+def is_strong_downtrend(df):
+    last_candle = df.iloc[-1]
+    return last_candle['ema_fast'] < last_candle['ema_slow']
 
-    price = df['close'].iloc[-1]
-    ema_fast = df['ema_fast'].iloc[-1]
-    ema_slow = df['ema_slow'].iloc[-1]
-    ema_big = df['ema_big'].iloc[-1]
-    rsi14 = df['rsi14'].iloc[-1]
-    macd = df['macd'].iloc[-1]
-    signal = df['signal'].iloc[-1]
-    volume = df['volume'].iloc[-1]
-    volume_ma = df['volume_ma'].iloc[-1]
+def is_market_safe(df_1h):
+    last_candle = df_1h.iloc[-1]
+    prev_candle = df_1h.iloc[-2]
+    price_change = (last_candle['close'] - prev_candle['close']) / prev_candle['close']
+    return price_change > -0.05
 
-    prediction = ""
-    if ema_fast > ema_slow > ema_big and rsi14 < 65 and macd > signal and volume > volume_ma:
-        prediction = "🚀 Dự đoán: Tín hiệu tăng giá mạnh"
-    elif ema_fast < ema_slow and macd < signal:
-        prediction = "🔻 Dự đoán: Tín hiệu giảm giá mạnh"
-    else:
-        prediction = "⏳ Dự đoán: Giá đi ngang hoặc chưa rõ xu hướng"
+def is_volatile_enough(df, threshold=0.003):
+    last_candle = df.iloc[-1]
+    atr_percent = last_candle['atr'] / last_candle['close']
+    return atr_percent > threshold
 
-    await send_telegram(
-"
-        f"📈 Phân tích DOGE/USDT:
-"
-        f"- Giá hiện tại: {price:.4f}
-"
-        f"- EMA Fast: {ema_fast:.4f}
-"
-        f"- EMA Slow: {ema_slow:.4f}
-"
-        f"- EMA Big: {ema_big:.4f}
-"
-        f"- RSI14: {rsi14:.2f}
-"
-        f"- MACD: {macd:.4f} | Signal: {signal:.4f}
-"
-        f"- Volume hiện tại: {volume:.0f} | TB Volume: {volume_ma:.0f}
-"
-        f"{prediction}"
+def should_increase(df):
+    last_candle = df.iloc[-1]
+    prev_candle = df.iloc[-2]
+    trend_strategy = (
+        last_candle['ema_fast'] > last_candle['ema_slow'] and
+        last_candle['rsi14'] < 70 and
+        last_candle['macd'] > last_candle['signal'] and
+        prev_candle['macd'] <= prev_candle['signal']
     )
+    breakout_strategy = (
+        last_candle['close'] > prev_candle['resistance'] and
+        last_candle['volume'] > last_candle['volume_ma']
+    )
+    return trend_strategy or breakout_strategy
 
-async def runner():
-    keep_alive()
-    await send_telegram("🤖 Bot Dự đoán DOGE/USDT đã khởi động!")
-    schedule.every(20).seconds.do(lambda: asyncio.ensure_future(analyze_and_predict()))
-    schedule.every(5).minutes.do(lambda: asyncio.ensure_future(log_portfolio()))
+def should_decrease(df):
+    last_candle = df.iloc[-1]
+    prev_candle = df.iloc[-2]
+    trend_strategy = (
+        last_candle['ema_fast'] < last_candle['ema_slow'] and
+        last_candle['rsi14'] > 30 and
+        last_candle['macd'] < last_candle['signal'] and
+        prev_candle['macd'] >= prev_candle['signal']
+    )
+    breakdown_strategy = (
+        last_candle['close'] < prev_candle['low'].rolling(20).min() and
+        last_candle['volume'] > last_candle['volume_ma']
+    )
+    return trend_strategy or breakdown_strategy
+
+async def log_assets(exchange):
+    global daily_start_capital_usd, last_day, last_total_value_usd
+    try:
+        balance = await exchange.fetch_balance()
+        total_value_usdt = 0.0
+        usdt_usd_rate = await fetch_usdt_usd_rate(exchange)
+
+        # Lấy số dư từ balance['total']
+        usdt = float(balance['total'].get('USDT', 0.0))
+        total_value_usdt = usdt
+
+        coins = {}
+        for currency in balance['total']:
+            coin_balance = float(balance['total'].get(currency, 0.0))
+            if coin_balance > 0 and currency != 'USDT':
+                try:
+                    symbol = f"{currency}/USDT"
+                    ticker = await exchange.fetch_ticker(symbol)
+                    price = ticker['last']
+                    coin_value = coin_balance * price
+                    total_value_usdt += coin_value
+                    coins[currency] = {'balance': coin_balance, 'price': price, 'value_usd': coin_value * usdt_usd_rate}
+                except Exception:
+                    continue
+
+        total_value_usd = total_value_usdt * usdt_usd_rate
+
+        # Cập nhật vốn khởi đầu ngày (21:00)
+        now = datetime.now(timezone(timedelta(hours=7)))
+        today = now.date()
+        if last_day is None or (today != last_day and now.hour >= 21):
+            daily_start_capital_usd = total_value_usd
+            last_day = today
+
+        # Tính lợi nhuận
+        profit_percent = ((total_value_usd - daily_start_capital_usd) / daily_start_capital_usd * 100) if daily_start_capital_usd > 0 else 0
+
+        # Log tài sản
+        if last_total_value_usd > 0.01 or abs(total_value_usd - last_total_value_usd) > 0.01:
+            msg = f"💰 Tổng tài sản: {total_value_usd:.2f} USD\n💵 USDT: {usdt:.2f}\n"
+            for currency, data in coins.items():
+                msg += f"🪙 {currency}: {data['balance']:.4f} | Giá: {data['price']:.4f} | Giá trị: {data['value_usd']:.2f} USD\n"
+            msg += f"📈 Lợi nhuận 10).minutes.do(lambda: asyncio.ensure_future(log_assets(exchange)))
     while True:
         schedule.run_pending()
         await asyncio.sleep(1)
