@@ -9,11 +9,11 @@ from telegram import Bot
 from keep_alive import keep_alive
 
 # === CONFIG ===
-API_KEY = "YOUR_API_KEY"  # Thay bằng API key thật
-API_SECRET = "YOUR_API_SECRET"  # Thay bằng API secret thật
-PASSPHRASE = "YOUR_PASSPHRASE"  # Nếu có
-TELEGRAM_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"
+API_KEY = "99d39d59-c05d-4e40-9f2a-3615eac315ea"  # Thay bằng API key thật
+API_SECRET = "4B1D25C8F05E12717AD561584B2853E6"  # Thay bằng API secret thật
+PASSPHRASE = "Mmoarb2025@"  # Nếu có
+TELEGRAM_TOKEN = "7817283052:AAF2fjxxZT8LP-gblBeTbpb0N0-a0C7GLQ8"
+TELEGRAM_CHAT_ID = "5850622014"
 
 SYMBOL = "DOGE/USDT"
 TIMEFRAME = "5m"  # Dùng khung 5 phút để giảm false signal
@@ -178,7 +178,7 @@ async def runner():
     keep_alive()
     await send_telegram("🤖 Bot DOGE/USDT đã khởi động!")
     schedule.every(1).minutes.do(lambda: asyncio.ensure_future(analyze_and_trade()))
-    schedule.every(30).minutes.do(lambda: asyncio.ensure_future(log_portfolio()))
+    schedule.every(15).minutes.do(lambda: asyncio.ensure_future(log_portfolio()))
     while True:
         schedule.run_pending()
         await asyncio.sleep(1)
