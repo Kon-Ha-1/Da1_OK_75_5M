@@ -17,20 +17,13 @@ TELEGRAM_CHAT_ID = "5850622014"
 
 SYMBOLS = ["DOGE/USDT", "SHIB/USDT", "SOL/USDT", "BNB/USDT", "NEAR/USDT"]
 TIMEFRAME = "5m"
-TP_PERCENT = 0.01  # Take Profit 1%
-SL_PERCENT = 0.005  # Stop Loss 0.5%
-RISK_PER_TRADE = 0.02  # Rủi ro 2% vốn
-MIN_BALANCE_PER_TRADE = 3  # Tối thiểu $3 mỗi lệnh
-MAX_LOSSES_PER_DAY = 2  # Tạm dừng coin nếu thua 2 lệnh/ngày
 DAILY_PROFIT_TARGET = 0.03  # Mục tiêu 3% mỗi ngày
 MAX_DAILY_LOSS = 0.05  # Dừng bot nếu lỗ >5% trong ngày
 
 bot = Bot(token=TELEGRAM_TOKEN)
 nest_asyncio.apply()
 
-trade_memory = {}
-loss_tracker = {symbol: {'count': 0, 'date': None} for symbol in SYMBOLS}
-can_trade_status = {symbol: None for symbol in SYMBOLS}  # Lưu trạng thái có thể giao dịch
+can_trade_status = {symbol: None for symbol in SYMBOLS}  # Lưu trạng thái dự đoán
 last_usdt_balance = None  # Lưu số dư USDT để tránh báo lặp
 capital = 0.0  # Sẽ được khởi tạo từ tổng tài sản
 daily_profit = 0.0
@@ -81,7 +74,7 @@ async def initialize_capital(exchange):
         last_day = datetime.now(timezone(timedelta(hours=7))).date()
         is_first_run = False
         
-        portfolio_msg = f"🚀 Bot khởi động - Vốn ban đầu: {capital:.2f} USDT\n💵 USDT: {usdt:.2f}\n"
+        portfolio_msg = f"🚀 Bot dự đoán khởi động - Vốn ban đầu: {capital:.2f} USDT\n💵 USDT: {usdt:.2f}\n"
         for currency, data in coin_values_at_start.items():
             portfolio_msg += f"🪙 {currency}: {data['balance']:.4f} | Giá trị: {data['value']:.2f} USDT\n"
         portfolio_msg += f"🎯 Mục tiêu lợi nhuận: 3% mỗi ngày (tính từ 21:00 VN)"
@@ -153,6 +146,10 @@ def is_strong_uptrend(df_15m):
     last_candle = df_15m.iloc[-1]
     return last_candle['ema_fast'] > last_candle['ema_slow']
 
+def is_strong_downtrend(df_15m):
+    last_candle = df_15m.iloc[-1]
+    return last_candle['ema_fast'] < last_candle['ema_slow']
+
 def is_market_safe(df_1h):
     last_candle = df_1h.iloc[-1]
     prev_candle = df_1h.iloc[-2]
@@ -164,7 +161,7 @@ def is_volatile_enough(df_5m):
     atr_percent = last_candle['atr'] / last_candle['close']
     return atr_percent > 0.004
 
-def should_buy(df):
+def should_increase(df):
     last_candle = df.iloc[-1]
     prev_candle = df.iloc[-2]
     
@@ -182,13 +179,23 @@ def should_buy(df):
     
     return trend_strategy or breakout_strategy
 
-def can_trade(symbol):
-    tracker = loss_tracker[symbol]
-    today = datetime.now(timezone(timedelta(hours=7))).date()
-    if tracker['date'] != today:
-        tracker['count'] = 0
-        tracker['date'] = today
-    return tracker['count'] < MAX_LOSSES_PER_DAY
+def should_decrease(df):
+    last_candle = df.iloc[-1]
+    prev_candle = df.iloc[-2]
+    
+    trend_strategy = (
+        last_candle['ema_fast'] < last_candle['ema_slow'] and
+        last_candle['rsi14'] > 30 and
+        last_candle['macd'] < last_candle['signal'] and
+        prev_candle['macd'] >= prev_candle['signal']
+    )
+    
+    breakdown_strategy = (
+        last_candle['close'] < prev_candle['low'].rolling(20).min() and
+        last_candle['volume'] > last_candle['volume_ma']
+    )
+    
+    return trend_strategy or breakdown_strategy
 
 async def update_capital(exchange):
     global capital, daily_profit, daily_start_capital, last_day, is_first_run, coin_values_at_start
@@ -225,7 +232,7 @@ async def update_capital(exchange):
             if daily_profit < DAILY_PROFIT_TARGET:
                 await send_telegram(
                     f"⚠️ Lợi nhuận ngày {last_day} không đạt 3%: {daily_profit*100:.2f}%\n"
-                    f"Bot tạm dừng đến 21:00 ngày mai."
+                    f"Bot tạm dừng dự đoán đến 21:00 ngày mai."
                 )
                 return False
             
@@ -243,7 +250,7 @@ async def update_capital(exchange):
         if (daily_start_capital - total_value) / daily_start_capital > MAX_DAILY_LOSS:
             await send_telegram(
                 f"🛑 Lỗ vượt 5% trong ngày: {total_value:.2f} USDT\n"
-                f"Bot tạm dừng đến 21:00 ngày mai."
+                f"Bot tạm dừng dự đoán đến 21:00 ngày mai."
             )
             return False
         
@@ -252,18 +259,12 @@ async def update_capital(exchange):
         await send_telegram(f"❌ Lỗi cập nhật vốn: {str(e)}")
         return True
 
-async def analyze_and_trade(exchange):
-    global capital, daily_profit, daily_start_capital, last_day, can_trade_status, last_usdt_balance
+async def analyze_and_predict(exchange):
+    global can_trade_status, last_usdt_balance
     if not await update_capital(exchange):
         return
 
     for symbol in SYMBOLS:
-        if not can_trade(symbol):
-            if can_trade_status[symbol] != False:
-                await send_telegram(f"⏳ {symbol}: Tạm dừng do đạt giới hạn thua ({MAX_LOSSES_PER_DAY}/ngày)")
-                can_trade_status[symbol] = False
-            continue
-
         df_5m = await fetch_ohlcv(exchange, symbol, TIMEFRAME)
         df_15m = await fetch_ohlcv_15m(exchange, symbol)
         df_1h = await fetch_ohlcv_1h(exchange, symbol)
@@ -271,106 +272,63 @@ async def analyze_and_trade(exchange):
             continue
 
         price = df_5m['close'].iloc[-1]
-        holding = trade_memory.get(symbol)
+        atr_percent = (df_5m['atr'].iloc[-1] / price) * 100  # % biến động trung bình
 
-        if holding:
-            buy_price = holding['buy_price']
-            amount = holding['amount']
-            sl_price = holding.get('sl_price', buy_price * (1 - SL_PERCENT))
-            
-            if price >= buy_price * 1.003:
-                sl_price = max(sl_price, price * (1 - SL_PERCENT))
-                trade_memory[symbol]['sl_price'] = sl_price
-            
-            if price >= buy_price * (1 + TP_PERCENT):
-                try:
-                    await exchange.create_market_sell_order(symbol, amount)
-                    profit_usdt = (price - buy_price) * amount
-                    await send_telegram(
-                        f"✅ TP BÁN {amount:.0f} {symbol.split('/')[0]}\n"
-                        f"💰 Lợi nhuận: +{profit_usdt:.2f} USDT ({TP_PERCENT*100}%)\n"
-                    )
-                    trade_memory.pop(symbol)
-                    can_trade_status[symbol] = None  # Reset trạng thái sau giao dịch
-                except Exception as e:
-                    await send_telegram(f"❌ Lỗi khi TP SELL {symbol}: {e}")
-            
-            elif price <= sl_price:
-                try:
-                    await exchange.create_market_sell_order(symbol, amount)
-                    loss_usdt = (buy_price - price) * amount
-                    loss_tracker[symbol]['count'] += 1
-                    await send_telegram(
-                        f"🛑 SL CẮT LỖ {amount:.0f} {symbol.split('/')[0]}\n"
-                        f"💸 Lỗ: -{loss_usdt:.2f} USDT ({SL_PERCENT*100}%)\n"
-                        f"📉 Lỗ hôm nay: {loss_tracker[symbol]['count']}/{MAX_LOSSES_PER_DAY}"
-                    )
-                    trade_memory.pop(symbol)
-                    can_trade_status[symbol] = None  # Reset trạng thái sau giao dịch
-                except Exception as e:
-                    await send_telegram(f"❌ Lỗi khi SL SELL {symbol}: {e}")
-        
+        reasons = []
+        can_predict = True
+        trend = None
+        predicted_change = 0.0
+
+        if not is_strong_uptrend(df_15m) and not is_strong_downtrend(df_15m):
+            reasons.append("Không có xu hướng rõ ràng (EMA5 ≈ EMA12)")
+            can_predict = False
+        elif not is_market_safe(df_1h):
+            reasons.append("Thị trường không an toàn (giá giảm >5%)")
+            can_predict = False
+        elif not is_volatile_enough(df_5m):
+            reasons.append("Biến động thấp (ATR < 0.4%)")
+            can_predict = False
         else:
-            reasons = []
-            can_buy = True
-            if not should_buy(df_5m):
-                reasons.append("Không thỏa tín hiệu mua (EMA/MACD/breakout)")
-                can_buy = False
-            if not is_strong_uptrend(df_15m):
-                reasons.append("Không có xu hướng tăng mạnh (EMA5 > EMA12)")
-                can_buy = False
-            if not is_market_safe(df_1h):
-                reasons.append("Thị trường không an toàn (giá giảm >5%)")
-                can_buy = False
-            if not is_volatile_enough(df_5m):
-                reasons.append("Biến động thấp (ATR < 0.4%)")
-                can_buy = False
-            
-            try:
-                balance = await exchange.fetch_balance()
-                usdt_balance = float(balance['USDT']['free'])
-                if last_usdt_balance is None or abs(usdt_balance - last_usdt_balance) > 0.01:
-                    await send_telegram(f"💵 Số dư USDT: {usdt_balance:.2f} (tối thiểu {MIN_BALANCE_PER_TRADE})")
-                    last_usdt_balance = usdt_balance
-                
-                if usdt_balance < MIN_BALANCE_PER_TRADE:
-                    reasons.append(f"Số dư USDT thấp: {usdt_balance:.2f} < {MIN_BALANCE_PER_TRADE}")
-                    can_buy = False
-                elif (usdt_balance * RISK_PER_TRADE) / price * price < MIN_BALANCE_PER_TRADE:
-                    reasons.append(f"Lệnh quá nhỏ: {(usdt_balance * RISK_PER_TRADE) / price * price:.2f} < {MIN_BALANCE_PER_TRADE}")
-                    can_buy = False
-            except Exception as e:
-                reasons.append(f"Lỗi kiểm tra số dư: {str(e)}")
-                can_buy = False
-            
-            # Chỉ gửi thông báo khi trạng thái thay đổi
-            if can_buy and can_trade_status[symbol] != True:
-                await send_telegram(f"✅ {symbol}: Có thể giao dịch, đang tìm tín hiệu mua")
-                can_trade_status[symbol] = True
-            elif not can_buy and can_trade_status[symbol] != False:
-                await send_telegram(f"⏳ {symbol}: Không giao dịch. Lý do: {', '.join(reasons)}")
-                can_trade_status[symbol] = False
-            
-            if can_buy:
-                try:
-                    amount = round((usdt_balance * RISK_PER_TRADE) / price, 0)
-                    if amount * price >= MIN_BALANCE_PER_TRADE:
-                        order = await exchange.create_market_buy_order(symbol, amount)
-                        avg_price = order['average'] or price
-                        trade_memory[symbol] = {
-                            'buy_price': avg_price,
-                            'amount': amount,
-                            'sl_price': avg_price * (1 - SL_PERCENT),
-                            'timestamp': datetime.now(timezone(timedelta(hours=7))).isoformat()
-                        }
-                        await send_telegram(
-                            f"🚀 MUA {amount:.0f} {symbol.split('/')[0]} tại {avg_price:.4f}\n"
-                            f"🎯 TP: {avg_price * (1 + TP_PERCENT):.4f} (+{TP_PERCENT*100}%)\n"
-                            f"🔪 SL: {avg_price * (1 - SL_PERCENT):.4f} (-{SL_PERCENT*100}%)"
-                        )
-                        can_trade_status[symbol] = None  # Reset trạng thái sau khi mua
-                except Exception as e:
-                    await send_telegram(f"❌ Lỗi khi BUY {symbol}: {e}")
+            if should_increase(df_5m):
+                trend = "increase"
+                predicted_change = min(atr_percent, 1.0)  # Giới hạn tăng tối đa 1%
+            elif should_decrease(df_5m):
+                trend = "decrease"
+                predicted_change = min(atr_percent, 0.5)  # Giới hạn giảm tối đa 0.5%
+            else:
+                reasons.append("Không thỏa tín hiệu tăng/giảm (EMA/MACD/breakout)")
+                can_predict = False
+
+        try:
+            balance = await exchange.fetch_balance()
+            usdt_balance = float(balance['USDT']['free'])
+            if last_usdt_balance is None or abs(usdt_balance - last_usdt_balance) > 0.01:
+                await send_telegram(f"💵 Số dư USDT: {usdt_balance:.2f}")
+                last_usdt_balance = usdt_balance
+        except Exception as e:
+            reasons.append(f"Lỗi kiểm tra số dư: {str(e)}")
+            can_predict = False
+
+        # Chỉ gửi thông báo khi trạng thái thay đổi
+        if can_predict and can_trade_status[symbol] != True:
+            await send_telegram(f"✅ {symbol}: Có thể dự đoán, đang phân tích xu hướng")
+            can_trade_status[symbol] = True
+        elif not can_predict and can_trade_status[symbol] != False:
+            await send_telegram(f"⏳ {symbol}: Không dự đoán. Lý do: {', '.join(reasons)}")
+            can_trade_status[symbol] = False
+
+        if can_predict and trend:
+            if trend == "increase":
+                await send_telegram(
+                    f"📈 {symbol}: Dự đoán TĂNG {predicted_change:.2f}% "
+                    f"(dựa trên ATR: {atr_percent:.2f}%)"
+                )
+            else:
+                await send_telegram(
+                    f"📉 {symbol}: Dự đoán GIẢM {predicted_change:.2f}% "
+                    f"(dựa trên ATR: {atr_percent:.2f}%)"
+                )
+            can_trade_status[symbol] = None  # Reset trạng thái sau dự đoán
 
 async def log_portfolio(exchange):
     global coin_values_at_start
@@ -420,8 +378,8 @@ async def runner():
             await send_telegram("🛑 Không thể khởi tạo vốn. Bot dừng.")
             return
         
-        await send_telegram("🤖 Bot giao dịch đã khởi động! Chạy 24/7")
-        schedule.every(15).seconds.do(lambda: asyncio.ensure_future(analyze_and_trade(exchange)))
+        await send_telegram("🤖 Bot dự đoán đã khởi động! Chạy 24/7")
+        schedule.every(15).seconds.do(lambda: asyncio.ensure_future(analyze_and_predict(exchange)))
         schedule.every(15).minutes.do(lambda: asyncio.ensure_future(log_portfolio(exchange)))
         while True:
             schedule.run_pending()
