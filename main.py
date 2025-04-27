@@ -107,6 +107,7 @@ async def analyze_and_predict():
         prediction = "⏳ Dự đoán: Giá đi ngang hoặc chưa rõ xu hướng"
 
     await send_telegram(
+"
         f"📈 Phân tích DOGE/USDT:
 "
         f"- Giá hiện tại: {price:.4f}
