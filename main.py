@@ -59,7 +59,6 @@ async def fetch_ohlcv(exchange, symbol, timeframe='5m'):
         
         df['ema_fast'] = df['close'].ewm(span=5, adjust=False).mean()
         df['ema_slow'] = df['close'].ewm(span=12, adjust=False).mean()
-        df['ema_big'] = df['close'].ewm(span=30, adjust=False).mean()
         df['rsi14'] = compute_rsi(df['close'], 14)
         df['resistance'] = df['high'].rolling(20).max()
         df['volume_ma'] = df['volume'].rolling(10).mean()
@@ -86,7 +85,6 @@ async def fetch_ohlcv_15m(exchange, symbol):
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True).dt.tz_convert('Asia/Ho_Chi_Minh')
         df['ema_fast'] = df['close'].ewm(span=5, adjust=False).mean()
         df['ema_slow'] = df['close'].ewm(span=12, adjust=False).mean()
-        df['ema_big'] = df['close'].ewm(span=30, adjust=False).mean()
         return df
     except Exception as e:
         print(f"[OHLCV 15m Error] {symbol}: {e}")
@@ -113,19 +111,18 @@ def compute_rsi(series, period):
 
 def is_strong_uptrend(df_15m):
     last_candle = df_15m.iloc[-1]
-    return (last_candle['ema_fast'] > last_candle['ema_slow'] and 
-            last_candle['ema_slow'] > last_candle['ema_big'])
+    return last_candle['ema_fast'] > last_candle['ema_slow']  # Chỉ EMA5 > EMA12
 
 def is_market_safe(df_1h):
     last_candle = df_1h.iloc[-1]
     prev_candle = df_1h.iloc[-2]
     price_change = (last_candle['close'] - prev_candle['close']) / prev_candle['close']
-    return price_change > -0.03
+    return price_change > -0.05  # Giá giảm <5%
 
 def is_volatile_enough(df_5m):
     last_candle = df_5m.iloc[-1]
     atr_percent = last_candle['atr'] / last_candle['close']
-    return atr_percent > 0.007
+    return atr_percent > 0.004  # ATR > 0.4%
 
 def should_buy(df):
     last_candle = df.iloc[-1]
@@ -171,6 +168,7 @@ async def update_capital():
         
         today = datetime.now(timezone(timedelta(hours=7))).date()
         if today != last_day:
+            # Tính lợi nhuận dựa trên tổng tài sản đầu ngày
             daily_profit = (total_value - daily_start_capital) / daily_start_capital
             if daily_profit < DAILY_PROFIT_TARGET:
                 await send_telegram(
@@ -179,6 +177,7 @@ async def update_capital():
                 )
                 return False
             
+            # Cập nhật vốn (lãi kép)
             capital = total_value
             daily_start_capital = total_value
             last_day = today
@@ -187,6 +186,7 @@ async def update_capital():
                 f"🎯 Lợi nhuận ngày trước: {daily_profit*100:.2f}%"
             )
         
+        # Kiểm tra lỗ dựa trên tổng tài sản
         if (daily_start_capital - total_value) / daily_start_capital > MAX_DAILY_LOSS:
             await send_telegram(
                 f"🛑 Lỗ vượt 5% trong ngày: {total_value:.2f} USDT\n"
@@ -201,19 +201,21 @@ async def update_capital():
         return True
 
 async def analyze_and_trade():
-    global capital, daily_profit, daily_start_capital, last_day  # Khai báo global đầu hàm
+    global capital, daily_profit, daily_start_capital, last_day
     if not await update_capital():
         return
 
     ex = create_exchange()
     for symbol in SYMBOLS:
         if not can_trade(symbol):
+            await send_telegram(f"⏳ {symbol}: Tạm dừng do đạt giới hạn thua ({MAX_LOSSES_PER_DAY}/ngày)")
             continue
 
         df_5m = await fetch_ohlcv(ex, symbol, TIMEFRAME)
         df_15m = await fetch_ohlcv_15m(ex, symbol)
         df_1h = await fetch_ohlcv_1h(ex, symbol)
         if df_5m is None or df_15m is None or df_1h is None:
+            await send_telegram(f"❌ {symbol}: Lỗi lấy dữ liệu OHLCV")
             continue
 
         price = df_5m['close'].iloc[-1]
@@ -232,7 +234,6 @@ async def analyze_and_trade():
                 try:
                     await ex.create_market_sell_order(symbol, amount)
                     profit_usdt = (price - buy_price) * amount
-                    daily_profit += profit_usdt / daily_start_capital
                     await send_telegram(
                         f"✅ TP BÁN {amount:.0f} {symbol.split('/')[0]}\n"
                         f"💰 Lợi nhuận: +{profit_usdt:.2f} USDT ({TP_PERCENT*100}%)\n"
@@ -246,7 +247,6 @@ async def analyze_and_trade():
                     await ex.create_market_sell_order(symbol, amount)
                     loss_usdt = (buy_price - price) * amount
                     loss_tracker[symbol]['count'] += 1
-                    daily_profit -= loss_usdt / daily_start_capital
                     await send_telegram(
                         f"🛑 SL CẮT LỖ {amount:.0f} {symbol.split('/')[0]}\n"
                         f"💸 Lỗ: -{loss_usdt:.2f} USDT ({SL_PERCENT*100}%)\n"
@@ -256,14 +256,32 @@ async def analyze_and_trade():
                 except Exception as e:
                     await send_telegram(f"❌ Lỗi khi SL SELL {symbol}: {e}")
         
-        elif (should_buy(df_5m) and 
-              is_strong_uptrend(df_15m) and 
-              is_market_safe(df_1h) and 
-              is_volatile_enough(df_5m)):
+        else:
+            reasons = []
+            if not should_buy(df_5m):
+                reasons.append("Không thỏa tín hiệu mua (EMA/MACD/breakout)")
+            if not is_strong_uptrend(df_15m):
+                reasons.append("Không có xu hướng tăng mạnh (EMA5 > EMA12)")
+            if not is_market_safe(df_1h):
+                reasons.append("Thị trường không an toàn (giá giảm >5%)")
+            if not is_volatile_enough(df_5m):
+                reasons.append("Biến động thấp (ATR < 0.4%)")
+            
             try:
                 balance = await ex.fetch_balance()
                 usdt_balance = float(balance['USDT']['free'])
-                if usdt_balance >= MIN_BALANCE_PER_TRADE:
+                await send_telegram(f"💵 Số dư USDT: {usdt_balance:.2f} (tối thiểu {MIN_BALANCE_PER_TRADE})")
+                if usdt_balance < MIN_BALANCE_PER_TRADE:
+                    reasons.append(f"Số dư USDT thấp: {usdt_balance:.2f} < {MIN_BALANCE_PER_TRADE}")
+                elif (usdt_balance * RISK_PER_TRADE) / price * price < MIN_BALANCE_PER_TRADE:
+                    reasons.append(f"Lệnh quá nhỏ: {(usdt_balance * RISK_PER_TRADE) / price * price:.2f} < {MIN_BALANCE_PER_TRADE}")
+            except Exception as e:
+                reasons.append(f"Lỗi kiểm tra số dư: {str(e)}")
+            
+            if reasons:
+                await send_telegram(f"⏳ {symbol}: Không giao dịch. Lý do: {', '.join(reasons)}")
+            else:
+                try:
                     amount = round((usdt_balance * RISK_PER_TRADE) / price, 0)
                     if amount * price >= MIN_BALANCE_PER_TRADE:
                         order = await ex.create_market_buy_order(symbol, amount)
@@ -279,8 +297,8 @@ async def analyze_and_trade():
                             f"🎯 TP: {avg_price * (1 + TP_PERCENT):.4f} (+{TP_PERCENT*100}%)\n"
                             f"🔪 SL: {avg_price * (1 - SL_PERCENT):.4f} (-{SL_PERCENT*100}%)"
                         )
-            except Exception as e:
-                await send_telegram(f"❌ Lỗi khi BUY {symbol}: {str(e)}")
+                except Exception as e:
+                    await send_telegram(f"❌ Lỗi khi BUY {symbol}: {str(e)}")
     
     await ex.close()
 
