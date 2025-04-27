@@ -81,7 +81,7 @@ async def initialize_capital(exchange):
         last_day = datetime.now(timezone(timedelta(hours=7))).date()
         is_first_run = False
         
-        portfolio       portfolio_msg = f"🚀 Bot khởi động - Vốn ban đầu: {capital:.2f} USDT\n💵 USDT: {usdt:.2f}\n"
+        portfolio_msg = f"🚀 Bot khởi động - Vốn ban đầu: {capital:.2f} USDT\n💵 USDT: {usdt:.2f}\n"
         for currency, data in coin_values_at_start.items():
             portfolio_msg += f"🪙 {currency}: {data['balance']:.4f} | Giá trị: {data['value']:.2f} USDT\n"
         portfolio_msg += f"🎯 Mục tiêu lợi nhuận: 3% mỗi ngày (tính từ 21:00 VN)"
@@ -420,7 +420,7 @@ async def runner():
             await send_telegram("🛑 Không thể khởi tạo vốn. Bot dừng.")
             return
         
-        await send_telegram("🤖 Bot giao dịch đã khởi động! Chạy 24/7 với lãi kép (múi giờ Việt Nam)")
+        await send_telegram("🤖 Bot giao dịch đã khởi động! Chạy 24/7")
         schedule.every(15).seconds.do(lambda: asyncio.ensure_future(analyze_and_trade(exchange)))
         schedule.every(15).minutes.do(lambda: asyncio.ensure_future(log_portfolio(exchange)))
         while True:
