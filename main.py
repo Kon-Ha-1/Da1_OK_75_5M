@@ -14,27 +14,17 @@ PASSPHRASE = "Mmoarb2025@"
 TELEGRAM_TOKEN = "7817283052:AAF2fjxxZT8LP-gblBeTbpb0N0-a0C7GLQ8"
 TELEGRAM_CHAT_ID = "5850622014"
 
-SYMBOLS = ["DOGE/USDT"]  # Chỉ giữ DOGE
-DAILY_PROFIT_TARGET = 0.03  # Mục tiêu 3% mỗi ngày
-MAX_DAILY_LOSS = 0.05  # Dừng bot nếu lỗ >5% trong ngày
-
+SYMBOLS = ["DOGE/USDT"]
 bot = Bot(token=TELEGRAM_TOKEN)
 nest_asyncio.apply()
 
-can_trade_status = {symbol: None for symbol in SYMBOLS}  # Lưu trạng thái dự đoán
 last_total_value_usd = None  # Lưu tổng tài sản USD để tránh báo lặp
-capital_usd = 0.0  # Tổng tài sản USD
 daily_start_capital_usd = 0.0  # Tổng tài sản USD tại 21:00
 last_day = None  # Ngày cuối cùng cập nhật
-is_first_run = True  # Đánh dấu lần chạy đầu tiên
-coin_values_at_start = {}  # Lưu giá trị coin tại 21:00
 
 async def send_telegram(msg):
-    try:
-        vn_time = datetime.now(timezone(timedelta(hours=7))).strftime('%H:%M:%S %d/%m/%Y')
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"{msg}\n⏰ Giờ VN: {vn_time}")
-    except Exception as e:
-        print(f"[Telegram Error] {e}")
+    vn_time = datetime.now(timezone(timedelta(hours=7))).strftime('%H:%M:%S %d/%m/%Y')
+    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"{msg}\n⏰ Giờ VN: {vn_time}")
 
 def create_exchange():
     return ccxt.okx({
@@ -49,71 +39,12 @@ async def fetch_usdt_usd_rate(exchange):
     try:
         ticker = await exchange.fetch_ticker("USDT/USD")
         return float(ticker['last'])
-    except Exception as e:
-        await send_telegram(f"⚠️ Lỗi lấy tỷ giá USDT/USD: {str(e)}. Dùng tỷ giá mặc định 1:1.")
+    except Exception:
         return 1.0  # Mặc định 1:1 nếu lỗi
-
-async def initialize_capital(exchange):
-    global capital_usd, daily_start_capital_usd, last_day, is_first_run, coin_values_at_start, last_total_value_usd
-    try:
-        balance = await exchange.fetch_balance()
-        usdt = float(balance.get('USDT', {}).get('total', 0.0))
-        total_value_usdt = usdt
-        coin_values_at_start = {}
-
-        # Lấy tỷ giá USDT/USD
-        usdt_usd_rate = await fetch_usdt_usd_rate(exchange)
-
-        # Tính giá trị coin bằng USDT
-        info = balance.get('info', {})
-        data = info.get('data', [{}])
-        if not data or not isinstance(data, list):
-            await send_telegram("⚠️ API trả về dữ liệu không hợp lệ: 'data' rỗng hoặc không phải list.")
-            return False
-        
-        details = data[0].get('details', {})
-        if isinstance(details, dict):
-            for currency, info in details.items():
-                coin_balance = float(info.get('ccyBalance', 0))
-                if coin_balance > 0 and currency != 'USDT':
-                    try:
-                        symbol = f"{currency}/USDT"
-                        ticker = await exchange.fetch_ticker(symbol)
-                        price = ticker['last']
-                        coin_value = coin_balance * price
-                        total_value_usdt += coin_value
-                        coin_values_at_start[currency] = {'balance': coin_balance, 'value': coin_value}
-                    except Exception:
-                        continue
-        else:
-            await send_telegram("⚠️ Dữ liệu số dư không hợp lệ: 'details' không phải dictionary.")
-
-        # Quy đổi sang USD
-        total_value_usd = total_value_usdt * usdt_usd_rate
-        capital_usd = total_value_usd
-        daily_start_capital_usd = total_value_usd
-        last_day = datetime.now(timezone(timedelta(hours=7))).date()
-        is_first_run = False
-        last_total_value_usd = total_value_usd
-        
-        if total_value_usd == 0:
-            await send_telegram("⚠️ Tài khoản không có số dư (0 USD). Bot vẫn chạy để dự đoán giá.")
-            return True
-        
-        portfolio_msg = f"🚀 Bot dự đoán khởi động - Vốn ban đầu: {capital_usd:.2f} USD\n💵 USDT: {usdt:.2f} (Tỷ giá USDT/USD: {usdt_usd_rate:.4f})\n"
-        for currency, data in coin_values_at_start.items():
-            coin_value_usd = data['value'] * usdt_usd_rate
-            portfolio_msg += f"🪙 {currency}: {data['balance']:.4f} | Giá trị: {coin_value_usd:.2f} USD\n"
-        portfolio_msg += f"🎯 Mục tiêu lợi nhuận: 3% mỗi ngày (tính từ 21:00 VN)"
-        await send_telegram(portfolio_msg)
-        return True
-    except Exception as e:
-        await send_telegram(f"❌ Lỗi khởi tạo vốn: {str(e)}")
-        return False
 
 async def fetch_ohlcv(exchange, symbol, timeframe, limit=100):
     try:
-        data = await exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        data = await exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=100)
         df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True).dt.tz_convert('Asia/Ho_Chi_Minh')
         
@@ -161,7 +92,7 @@ def is_market_safe(df_1h):
     price_change = (last_candle['close'] - prev_candle['close']) / prev_candle['close']
     return price_change > -0.05
 
-def is_volatile_enough(df, threshold=0.004):
+def is_volatile_enough(df, threshold=0.003):
     last_candle = df.iloc[-1]
     atr_percent = last_candle['atr'] / last_candle['close']
     return atr_percent > threshold
@@ -169,159 +100,83 @@ def is_volatile_enough(df, threshold=0.004):
 def should_increase(df):
     last_candle = df.iloc[-1]
     prev_candle = df.iloc[-2]
-    
     trend_strategy = (
         last_candle['ema_fast'] > last_candle['ema_slow'] and
         last_candle['rsi14'] < 70 and
         last_candle['macd'] > last_candle['signal'] and
         prev_candle['macd'] <= prev_candle['signal']
     )
-    
     breakout_strategy = (
         last_candle['close'] > prev_candle['resistance'] and
         last_candle['volume'] > last_candle['volume_ma']
     )
-    
     return trend_strategy or breakout_strategy
 
 def should_decrease(df):
     last_candle = df.iloc[-1]
     prev_candle = df.iloc[-2]
-    
     trend_strategy = (
         last_candle['ema_fast'] < last_candle['ema_slow'] and
         last_candle['rsi14'] > 30 and
         last_candle['macd'] < last_candle['signal'] and
         prev_candle['macd'] >= prev_candle['signal']
     )
-    
     breakdown_strategy = (
         last_candle['close'] < prev_candle['low'].rolling(20).min() and
         last_candle['volume'] > last_candle['volume_ma']
     )
-    
     return trend_strategy or breakdown_strategy
 
-async def update_capital(exchange):
-    global capital_usd, daily_profit, daily_start_capital_usd, last_day, is_first_run, coin_values_at_start
+async def log_assets(exchange):
+    global daily_start_capital_usd, last_day, last_total_value_usd
     try:
         balance = await exchange.fetch_balance()
-        usdt = float(balance.get('USDT', {}).get('total', 0.0))
-        total_value_usdt = usdt
-        new_coin_values = {}
-
+        total_value_usdt = 0.0
         usdt_usd_rate = await fetch_usdt_usd_rate(exchange)
 
-        info = balance.get('info', {})
-        data = info.get('data', [{}])
-        if not data or not isinstance(data, list):
-            await send_telegram("⚠️ API trả về dữ liệu không hợp lệ: 'data' rỗng hoặc không phải list.")
-            return True
-        
-        details = data[0].get('details', {})
-        if isinstance(details, dict):
-            for currency, info in details.items():
-                coin_balance = float(info.get('ccyBalance', 0))
-                if coin_balance > 0 and currency != 'USDT':
-                    try:
-                        symbol = f"{currency}/USDT"
-                        ticker = await exchange.fetch_ticker(symbol)
-                        price = ticker['last']
-                        coin_value = coin_balance * price
-                        total_value_usdt += coin_value
-                        new_coin_values[currency] = {'balance': coin_balance, 'value': coin_value}
-                    except Exception:
-                        continue
-        else:
-            await send_telegram("⚠️ Dữ liệu số dư không hợp lệ: 'details' không phải dictionary.")
-        
+        # Lấy số dư từ balance['total']
+        usdt = float(balance['total'].get('USDT', 0.0))
+        total_value_usdt = usdt
+
+        coins = {}
+        for currency in balance['total']:
+            coin_balance = float(balance['total'].get(currency, 0.0))
+            if coin_balance > 0 and currency != 'USDT':
+                try:
+                    symbol = f"{currency}/USDT"
+                    ticker = await exchange.fetch_ticker(symbol)
+                    price = ticker['last']
+                    coin_value = coin_balance * price
+                    total_value_usdt += coin_value
+                    coins[currency] = {'balance': coin_balance, 'price': price, 'value_usd': coin_value * usdt_usd_rate}
+                except Exception:
+                    continue
+
         total_value_usd = total_value_usdt * usdt_usd_rate
+
+        # Cập nhật vốn khởi đầu ngày (21:00)
         now = datetime.now(timezone(timedelta(hours=7)))
         today = now.date()
-        current_hour = now.hour
-        
-        if is_first_run:
-            return True
-        
-        if today != last_day and current_hour >= 21:
-            daily_profit = (total_value_usd - daily_start_capital_usd) / daily_start_capital_usd if daily_start_capital_usd > 0 else 0
-            if daily_profit < DAILY_PROFIT_TARGET:
-                await send_telegram(
-                    f"⚠️ Lợi nhuận ngày {last_day} không đạt 3%: {daily_profit*100:.2f}%\n"
-                    f"Bot tạm dừng dự đoán đến 21:00 ngày mai."
-                )
-                return False
-            
-            capital_usd = total_value_usd
+        if last_day is None or (today != last_day and now.hour >= 21):
             daily_start_capital_usd = total_value_usd
-            coin_values_at_start = new_coin_values
             last_day = today
-            portfolio_msg = f"📈 Ngày mới (21:00) - Cập nhật vốn: {capital_usd:.2f} USD\n💵 USDT: {usdt:.2f} (Tỷ giá USDT/USD: {usdt_usd_rate:.4f})\n"
-            for currency, data in coin_values_at_start.items():
-                coin_value_usd = data['value'] * usdt_usd_rate
-                portfolio_msg += f"🪙 {currency}: {data['balance']:.4f} | Giá trị: {coin_value_usd:.2f} USD\n"
-            portfolio_msg += f"🎯 Lợi nhuận ngày trước: {daily_profit*100:.2f}%"
-            await send_telegram(portfolio_msg)
-        
-        if daily_start_capital_usd > 0 and (daily_start_capital_usd - total_value_usd) / daily_start_capital_usd > MAX_DAILY_LOSS:
-            await send_telegram(
-                f"🛑 Lỗ vượt 5% trong ngày: {total_value_usd:.2f} USD\n"
-                f"Bot tạm dừng dự đoán đến 21:00 ngày mai."
-            )
-            return False
-        
-        return True
-    except Exception as e:
-        await send_telegram(f"❌ Lỗi cập nhật vốn: {str(e)}")
-        return True
 
-async def analyze_and_predict(exchange):
-    global can_trade_status, last_total_value_usd
-    if not await update_capital(exchange):
-        return
+        # Tính lợi nhuận
+        profit_percent = ((total_value_usd - daily_start_capital_usd) / daily_start_capital_usd * 100) if daily_start_capital_usd > 0 else 0
 
-    # Tính tổng tài sản USD
-    total_value_usd = 0.0
-    try:
-        balance = await exchange.fetch_balance()
-        usdt = float(balance.get('USDT', {}).get('total', 0.0))
-        total_value_usdt = usdt
-
-        usdt_usd_rate = await fetch_usdt_usd_rate(exchange)
-
-        info = balance.get('info', {})
-        data = info.get('data', [{}])
-        if not data or not isinstance(data, list):
-            await send_telegram("⚠️ API trả về dữ liệu không hợp lệ: 'data' rỗng hoặc không phải list.")
-            return
-        
-        details = data[0].get('details', {})
-        if isinstance(details, dict):
-            for currency, info in details.items():
-                coin_balance = float(info.get('ccyBalance', 0))
-                if coin_balance > 0 and currency != 'USDT':
-                    try:
-                        symbol = f"{currency}/USDT"
-                        ticker = await exchange.fetch_ticker(symbol)
-                        price = ticker['last']
-                        coin_value = coin_balance * price
-                        total_value_usdt += coin_value
-                    except Exception:
-                        continue
-        else:
-            await send_telegram("⚠️ Dữ liệu số dư không hợp lệ: 'details' không phải dictionary.")
-        
-        total_value_usd = total_value_usdt * usdt_usd_rate
+        # Log tài sản
         if last_total_value_usd is None or abs(total_value_usd - last_total_value_usd) > 0.01:
-            profit_percent = ((total_value_usd - daily_start_capital_usd) / daily_start_capital_usd * 100) if daily_start_capital_usd > 0 else 0
-            await send_telegram(f"💰 Tổng tài sản: {total_value_usd:.2f} USD | Lợi nhuận: {profit_percent:.2f}%")
+            msg = f"💰 Tổng tài sản: {total_value_usd:.2f} USD\n💵 USDT: {usdt:.2f}\n"
+            for currency, data in coins.items():
+                msg += f"🪙 {currency}: {data['balance']:.4f} | Giá: {data['price']:.4f} | Giá trị: {data['value_usd']:.2f} USD\n"
+            msg += f"📈 Lợi nhuận hôm nay: {profit_percent:.2f}%"
+            await send_telegram(msg)
             last_total_value_usd = total_value_usd
     except Exception as e:
-        await send_telegram(f"❌ Lỗi kiểm tra tổng tài sản: {str(e)}")
-        return
+        await send_telegram(f"❌ Lỗi log tài sản: {str(e)}")
 
-    # Dự đoán DOGE
-    symbol = SYMBOLS[0]  # Chỉ có DOGE/USDT
+async def predict_doge(exchange):
+    symbol = SYMBOLS[0]
     df_5m = await fetch_ohlcv(exchange, symbol, '5m', limit=100)
     df_15m = await fetch_ohlcv(exchange, symbol, '15m', limit=100)
     df_1h = await fetch_ohlcv(exchange, symbol, '1h', limit=100)
@@ -333,7 +188,7 @@ async def analyze_and_predict(exchange):
     can_predict = True
     trends = {}
 
-    # Kiểm tra điều kiện trên các khung thời gian
+    # Kiểm tra điều kiện
     if not is_strong_uptrend(df_5m) and not is_strong_downtrend(df_5m):
         reasons.append("5m: Không có xu hướng rõ ràng (EMA5 ≈ EMA12)")
         can_predict = False
@@ -343,11 +198,11 @@ async def analyze_and_predict(exchange):
     if not is_market_safe(df_1h):
         reasons.append("1h: Thị trường không an toàn (giá giảm >5%)")
         can_predict = False
-    if not is_volatile_enough(df_5m, 0.003):  # Giảm ngưỡng để tăng tần suất dự đoán
+    if not is_volatile_enough(df_5m, 0.003):
         reasons.append("5m: Biến động thấp (ATR < 0.3%)")
         can_predict = False
 
-    # Dự đoán cho 15 phút (dựa trên 5m), 30 phút (dựa trên 15m), 1 giờ (dựa trên 1h)
+    # Dự đoán
     if can_predict:
         # 15 phút (5m)
         atr_5m = df_5m['atr'].iloc[-1] / current_price * 100
@@ -371,14 +226,9 @@ async def analyze_and_predict(exchange):
             trends['1h'] = ("decrease", min(atr_1h, 1.0))
 
     # Gửi thông báo
-    if can_predict and can_trade_status[symbol] != True:
-        await send_telegram(f"✅ {symbol}: Có thể dự đoán, đang phân tích xu hướng")
-        can_trade_status[symbol] = True
-    elif not can_predict and can_trade_status[symbol] != False:
+    if not can_predict:
         await send_telegram(f"⏳ {symbol}: Không dự đoán. Lý do: {', '.join(reasons)}")
-        can_trade_status[symbol] = False
-
-    if can_predict and trends:
+    elif trends:
         prediction_msg = f"🔮 Dự đoán giá {symbol}:\n"
         for timeframe, (trend, change) in trends.items():
             if trend == "increase":
@@ -386,78 +236,16 @@ async def analyze_and_predict(exchange):
             else:
                 prediction_msg += f"📉 {timeframe}: GIẢM {change:.2f}% (dựa trên ATR: {locals()[f'atr_{timeframe.lower()}']:.2f}%)\n"
         await send_telegram(prediction_msg)
-        can_trade_status[symbol] = None
-
-async def log_portfolio(exchange):
-    global coin_values_at_start
-    try:
-        balance = await exchange.fetch_balance()
-        usdt = float(balance.get('USDT', {}).get('total', 0.0))
-        total_value_usdt = usdt
-        usdt_usd_rate = await fetch_usdt_usd_rate(exchange)
-        
-        info = balance.get('info', {})
-        data = info.get('data', [{}])
-        if not data or not isinstance(data, list):
-            await send_telegram("⚠️ API trả về dữ liệu không hợp lệ: 'data' rỗng hoặc không phải list.")
-            return
-        
-        details = data[0].get('details', {})
-        if isinstance(details, dict):
-            for currency, info in details.items():
-                coin_balance = float(info.get('ccyBalance', 0))
-                if coin_balance > 0 and currency != 'USDT':
-                    try:
-                        symbol = f"{currency}/USDT"
-                        ticker = await exchange.fetch_ticker(symbol)
-                        price = ticker['last']
-                        coin_value = coin_balance * price
-                        total_value_usdt += coin_value
-                    except Exception:
-                        continue
-        else:
-            await send_telegram("⚠️ Dữ liệu số dư không hợp lệ: 'details' không phải dictionary.")
-        
-        total_value_usd = total_value_usdt * usdt_usd_rate
-        daily_profit_percent = ((total_value_usd - daily_start_capital_usd) / daily_start_capital_usd * 100) if daily_start_capital_usd > 0 else 0
-        portfolio_msg = f"📊 Báo cáo tài sản\n💵 USDT: {usdt:.2f} (Tỷ giá USDT/USD: {usdt_usd_rate:.4f})\n"
-        for currency, data in coin_values_at_start.items():
-            try:
-                symbol = f"{currency}/USDT"
-                ticker = await exchange.fetch_ticker(symbol)
-                price = ticker['last']
-                coin_balance = float(details.get(currency, {}).get('ccyBalance', 0))
-                coin_value_usdt = coin_balance * price
-                coin_value_usd = coin_value_usdt * usdt_usd_rate
-                start_value_usd = data['value'] * usdt_usd_rate
-                profit_percent = ((coin_value_usd - start_value_usd) / start_value_usd * 100) if start_value_usd > 0 else 0
-                portfolio_msg += f"🪙 {currency}: {coin_balance:.4f} | Giá: {price:.4f} | Giá trị: {coin_value_usd:.2f} USD | Lợi nhuận: {profit_percent:.2f}%\n"
-            except Exception:
-                continue
-        portfolio_msg += f"💰 Tổng: {total_value_usd:.2f} USD\n📈 Lợi nhuận ngày: {daily_profit_percent:.2f}%"
-        await send_telegram(portfolio_msg)
-    except Exception as e:
-        await send_telegram(f"❌ Lỗi log_portfolio: {str(e)}")
 
 async def runner():
     keep_alive()
     exchange = create_exchange()
-    try:
-        if not await initialize_capital(exchange):
-            await send_telegram("🛑 Không thể khởi tạo vốn. Bot vẫn chạy để dự đoán giá.")
-        
-        await send_telegram("🤖 Bot dự đoán DOGE đã khởi động! Chạy 24/7")
-        schedule.every(15).seconds.do(lambda: asyncio.ensure_future(analyze_and_predict(exchange)))
-        schedule.every(15).minutes.do(lambda: asyncio.ensure_future(log_portfolio(exchange)))
-        while True:
-            schedule.run_pending()
-            await asyncio.sleep(1)
-    finally:
-        try:
-            await exchange.close()
-            await send_telegram("🔌 Đã đóng kết nối tới OKX")
-        except Exception as e:
-            await send_telegram(f"❌ Lỗi khi đóng kết nối OKX: {str(e)}")
+    await send_telegram("🤖 Bot dự đoán DOGE đã khởi động! Chạy 24/7")
+    schedule.every(15).seconds.do(lambda: asyncio.ensure_future(predict_doge(exchange)))
+    schedule.every(15).minutes.do(lambda: asyncio.ensure_future(log_assets(exchange)))
+    while True:
+        schedule.run_pending()
+        await asyncio.sleep(1)
 
 if __name__ == "__main__":
     asyncio.run(runner())
