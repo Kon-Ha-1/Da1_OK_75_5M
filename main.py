@@ -165,13 +165,17 @@ async def update_capital(exchange):
                 price = ticker['last']
                 total_value += coin_balance * price
         
-        today = datetime.now(timezone(timedelta(hours=7))).date()
-        if today != last_day:
+        now = datetime.now(timezone(timedelta(hours=7)))
+        today = now.date()
+        current_hour = now.hour
+        
+        # Kiểm tra ngày mới lúc 21:00 (9h PM VN)
+        if today != last_day and current_hour >= 21:
             daily_profit = (total_value - daily_start_capital) / daily_start_capital
             if daily_profit < DAILY_PROFIT_TARGET:
                 await send_telegram(
                     f"⚠️ Lợi nhuận ngày {last_day} không đạt 3%: {daily_profit*100:.2f}%\n"
-                    f"Bot tạm dừng đến ngày mai."
+                    f"Bot tạm dừng đến 21:00 ngày mai."
                 )
                 return False
             
@@ -179,14 +183,15 @@ async def update_capital(exchange):
             daily_start_capital = total_value
             last_day = today
             await send_telegram(
-                f"📈 Cập nhật vốn ngày {today}: {capital:.2f} USDT\n"
+                f"📈 Ngày mới (21:00) - Cập nhật vốn: {capital:.2f} USDT\n"
                 f"🎯 Lợi nhuận ngày trước: {daily_profit*100:.2f}%"
             )
         
+        # Kiểm tra lỗ dựa trên tổng tài sản
         if (daily_start_capital - total_value) / daily_start_capital > MAX_DAILY_LOSS:
             await send_telegram(
                 f"🛑 Lỗ vượt 5% trong ngày: {total_value:.2f} USDT\n"
-                f"Bot tạm dừng đến ngày mai."
+                f"Bot tạm dừng đến 21:00 ngày mai."
             )
             return False
         
@@ -276,7 +281,7 @@ async def analyze_and_trade(exchange):
             else:
                 try:
                     amount = round((usdt_balance * RISK_PER_TRADE) / price, 0)
-                    if amount * price >= MIN_BALANCE_PERotero:
+                    if amount * price >= MIN_BALANCE_PER_TRADE:
                         order = await exchange.create_market_buy_order(symbol, amount)
                         avg_price = order['average'] or price
                         trade_memory[symbol] = {
@@ -319,7 +324,7 @@ async def runner():
     keep_alive()
     exchange = create_exchange()
     try:
-        await send_telegram("🤖 Bot giao dịch đã khởi động! Chạy 24/7 với lãi kép (múi giờ Việt Nam)")
+        await send_telegram("🤖 Bot giao dịch đã khởi động! Chạy 24/7")
         schedule.every(15).seconds.do(lambda: asyncio.ensure_future(analyze_and_trade(exchange)))
         schedule.every(15).minutes.do(lambda: asyncio.ensure_future(log_portfolio(exchange)))
         while True:
