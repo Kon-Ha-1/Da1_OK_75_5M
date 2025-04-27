@@ -51,7 +51,7 @@ async def fetch_ohlcv(exchange):
         df['ema_slow'] = df['close'].ewm(span=12, adjust=False).mean()
         df['ema_big'] = df['close'].ewm(span=30, adjust=False).mean()
         df['rsi14'] = compute_rsi(df['close'], 14)
-        df['volume_ma'] =_album.volume'].rolling(10).mean()
+        df['volume_ma'] = df['volume'].rolling(10).mean()  # Sửa dòng này
         
         ema12 = df['close'].ewm(span=12, adjust=False).mean()
         ema26 = df['close'].ewm(span=26, adjust=False).mean()
