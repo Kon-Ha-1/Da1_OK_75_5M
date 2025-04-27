@@ -37,6 +37,7 @@ daily_profit = 0.0
 daily_start_capital = 0.0  # Sẽ được khởi tạo từ tổng tài sản
 last_day = None  # Sẽ được khởi tạo khi bot chạy
 is_first_run = True  # Đánh dấu lần chạy đầu tiên
+coin_values_at_start = {}  # Lưu giá trị coin tại 21:00 để tính lợi nhuận
 
 async def send_telegram(msg):
     try:
@@ -55,29 +56,36 @@ def create_exchange():
     })
 
 async def initialize_capital(exchange):
-    global capital, daily_start_capital, last_day, is_first_run
+    global capital, daily_start_capital, last_day, is_first_run, coin_values_at_start
     try:
         balance = await exchange.fetch_balance()
         usdt = float(balance['USDT']['total'])
         total_value = usdt
-        
-        for symbol in SYMBOLS:
-            coin = symbol.split('/')[0]
-            coin_balance = float(balance.get(coin, {}).get('total', 0))
-            if coin_balance > 0:
-                ticker = await exchange.fetch_ticker(symbol)
-                price = ticker['last']
-                total_value += coin_balance * price
+        coin_values_at_start = {}
+
+        for currency, info in balance.get('info', {}).get('data', [{}])[0].get('details', []).items():
+            coin_balance = float(info.get('ccyBalance', 0))
+            if coin_balance > 0 and currency != 'USDT':
+                try:
+                    symbol = f"{currency}/USDT"
+                    ticker = await exchange.fetch_ticker(symbol)
+                    price = ticker['last']
+                    coin_value = coin_balance * price
+                    total_value += coin_value
+                    coin_values_at_start[currency] = {'balance': coin_balance, 'value': coin_value}
+                except Exception:
+                    continue
         
         capital = total_value
         daily_start_capital = total_value
         last_day = datetime.now(timezone(timedelta(hours=7))).date()
         is_first_run = False
         
-        await send_telegram(
-            f"🚀 Bot khởi động - Vốn ban đầu: {capital:.2f} USDT\n"
-            f"🎯 Mục tiêu lợi nhuận: 3% mỗi ngày (tính từ 21:00 VN)"
-        )
+        portfolio       portfolio_msg = f"🚀 Bot khởi động - Vốn ban đầu: {capital:.2f} USDT\n💵 USDT: {usdt:.2f}\n"
+        for currency, data in coin_values_at_start.items():
+            portfolio_msg += f"🪙 {currency}: {data['balance']:.4f} | Giá trị: {data['value']:.2f} USDT\n"
+        portfolio_msg += f"🎯 Mục tiêu lợi nhuận: 3% mỗi ngày (tính từ 21:00 VN)"
+        await send_telegram(portfolio_msg)
         return True
     except Exception as e:
         await send_telegram(f"❌ Lỗi khởi tạo vốn: {str(e)}")
@@ -183,19 +191,25 @@ def can_trade(symbol):
     return tracker['count'] < MAX_LOSSES_PER_DAY
 
 async def update_capital(exchange):
-    global capital, daily_profit, daily_start_capital, last_day, is_first_run
+    global capital, daily_profit, daily_start_capital, last_day, is_first_run, coin_values_at_start
     try:
         balance = await exchange.fetch_balance()
         usdt = float(balance['USDT']['total'])
         total_value = usdt
-        
-        for symbol in SYMBOLS:
-            coin = symbol.split('/')[0]
-            coin_balance = float(balance.get(coin, {}).get('total', 0))
-            if coin_balance > 0:
-                ticker = await exchange.fetch_ticker(symbol)
-                price = ticker['last']
-                total_value += coin_balance * price
+        new_coin_values = {}
+
+        for currency, info in balance.get('info', {}).get('data', [{}])[0].get('details', []).items():
+            coin_balance = float(info.get('ccyBalance', 0))
+            if coin_balance > 0 and currency != 'USDT':
+                try:
+                    symbol = f"{currency}/USDT"
+                    ticker = await exchange.fetch_ticker(symbol)
+                    price = ticker['last']
+                    coin_value = coin_balance * price
+                    total_value += coin_value
+                    new_coin_values[currency] = {'balance': coin_balance, 'value': coin_value}
+                except Exception:
+                    continue
         
         now = datetime.now(timezone(timedelta(hours=7)))
         today = now.date()
@@ -217,11 +231,13 @@ async def update_capital(exchange):
             
             capital = total_value
             daily_start_capital = total_value
+            coin_values_at_start = new_coin_values
             last_day = today
-            await send_telegram(
-                f"📈 Ngày mới (21:00) - Cập nhật vốn: {capital:.2f} USDT\n"
-                f"🎯 Lợi nhuận ngày trước: {daily_profit*100:.2f}%"
-            )
+            portfolio_msg = f"📈 Ngày mới (21:00) - Cập nhật vốn: {capital:.2f} USDT\n💵 USDT: {usdt:.2f}\n"
+            for currency, data in coin_values_at_start.items():
+                portfolio_msg += f"🪙 {currency}: {data['balance']:.4f} | Giá trị: {data['value']:.2f} USDT\n"
+            portfolio_msg += f"🎯 Lợi nhuận ngày trước: {daily_profit*100:.2f}%"
+            await send_telegram(portfolio_msg)
         
         # Kiểm tra lỗ dựa trên tổng tài sản
         if (daily_start_capital - total_value) / daily_start_capital > MAX_DAILY_LOSS:
@@ -357,23 +373,41 @@ async def analyze_and_trade(exchange):
                     await send_telegram(f"❌ Lỗi khi BUY {symbol}: {e}")
 
 async def log_portfolio(exchange):
+    global coin_values_at_start
     try:
         balance = await exchange.fetch_balance()
         usdt = float(balance['USDT']['total'])
         total_value = usdt
         portfolio_msg = f"📊 Báo cáo tài sản\n💵 USDT: {usdt:.2f}\n"
         
-        for symbol in SYMBOLS:
-            coin = symbol.split('/')[0]
-            coin_balance = float(balance.get(coin, {}).get('total', 0))
-            if coin_balance > 0:
-                ticker = await exchange.fetch_ticker(symbol)
-                price = ticker['last']
-                coin_value = coin_balance * price
-                total_value += coin_value
-                portfolio_msg += f"🪙 {coin}: {coin_balance:.0f} | Giá: {price:.4f} | Giá trị: {coin_value:.2f} USDT\n"
+        for currency, info in balance.get('info', {}).get('data', [{}])[0].get('details', []).items():
+            coin_balance = float(info.get('ccyBalance', 0))
+            if coin_balance > 0 and currency != 'USDT':
+                try:
+                    symbol = f"{currency}/USDT"
+                    ticker = await exchange.fetch_ticker(symbol)
+                    price = ticker['last']
+                    coin_value = coin_balance * price
+                    total_value += coin_value
+                    
+                    # Tính lợi nhuận % dựa trên giá trị tại daily_start_capital
+                    start_data = coin_values_at_start.get(currency, {'value': coin_value, 'balance': coin_balance})
+                    start_value = start_data['value']
+                    start_balance = start_data['balance']
+                    if start_balance > 0 and start_value > 0:
+                        profit_percent = ((coin_value - start_value) / start_value) * 100
+                    else:
+                        profit_percent = 0.0
+                    
+                    portfolio_msg += (
+                        f"🪙 {currency}: {coin_balance:.4f} | Giá: {price:.4f} | "
+                        f"Giá trị: {coin_value:.2f} USDT | Lợi nhuận: {profit_percent:.2f}%\n"
+                    )
+                except Exception:
+                    continue
         
-        portfolio_msg += f"💰 Tổng: {total_value:.2f} USDT\n📈 Lợi nhuận ngày: {(total_value - daily_start_capital)/daily_start_capital*100:.2f}%"
+        daily_profit_percent = ((total_value - daily_start_capital) / daily_start_capital) * 100
+        portfolio_msg += f"💰 Tổng: {total_value:.2f} USDT\n📈 Lợi nhuận ngày: {daily_profit_percent:.2f}%"
         await send_telegram(portfolio_msg)
     except Exception as e:
         await send_telegram(f"❌ Lỗi log_portfolio: {str(e)}")
@@ -386,7 +420,7 @@ async def runner():
             await send_telegram("🛑 Không thể khởi tạo vốn. Bot dừng.")
             return
         
-        await send_telegram("🤖 Bot giao dịch đã khởi động! Chạy 24/7")
+        await send_telegram("🤖 Bot giao dịch đã khởi động! Chạy 24/7 với lãi kép (múi giờ Việt Nam)")
         schedule.every(15).seconds.do(lambda: asyncio.ensure_future(analyze_and_trade(exchange)))
         schedule.every(15).minutes.do(lambda: asyncio.ensure_future(log_portfolio(exchange)))
         while True:
