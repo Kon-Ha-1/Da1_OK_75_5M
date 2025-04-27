@@ -116,7 +116,7 @@ async def analyze_and_trade():
 
 async def runner():
     keep_alive()
-    await send_telegram("🤖 Bot MEMEFI Real-Time Trading khởi động!")
+    await send_telegram("🤖 Bot DOGE Real-Time Trading khởi động!")
     schedule.every(10).seconds.do(lambda: asyncio.ensure_future(analyze_and_trade()))
     while True:
         schedule.run_pending()
