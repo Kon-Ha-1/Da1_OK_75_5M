@@ -33,7 +33,7 @@ loss_tracker = {symbol: {'count': 0, 'date': None} for symbol in SYMBOLS}
 capital = 75.0  # Vốn ban đầu
 daily_profit = 0.0
 daily_start_capital = capital
-last_day = (datetime.now(timezone(timedelta(hours=7))).date())  # Múi giờ Việt Nam
+last_day = datetime.now(timezone(timedelta(hours=7))).date()  # Múi giờ Việt Nam
 
 async def send_telegram(msg):
     try:
@@ -201,6 +201,7 @@ async def update_capital():
         return True
 
 async def analyze_and_trade():
+    global capital, daily_profit, daily_start_capital, last_day  # Khai báo global đầu hàm
     if not await update_capital():
         return
 
@@ -231,7 +232,6 @@ async def analyze_and_trade():
                 try:
                     await ex.create_market_sell_order(symbol, amount)
                     profit_usdt = (price - buy_price) * amount
-                    global daily_profit
                     daily_profit += profit_usdt / daily_start_capital
                     await send_telegram(
                         f"✅ TP BÁN {amount:.0f} {symbol.split('/')[0]}\n"
@@ -246,7 +246,6 @@ async def analyze_and_trade():
                     await ex.create_market_sell_order(symbol, amount)
                     loss_usdt = (buy_price - price) * amount
                     loss_tracker[symbol]['count'] += 1
-                    global daily_profit
                     daily_profit -= loss_usdt / daily_start_capital
                     await send_telegram(
                         f"🛑 SL CẮT LỖ {amount:.0f} {symbol.split('/')[0]}\n"
