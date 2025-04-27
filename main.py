@@ -1,4 +1,4 @@
-import ccxt
+import ccxt.async_support as ccxt
 import asyncio
 import pandas as pd
 import os
@@ -9,22 +9,22 @@ from telegram import Bot
 from keep_alive import keep_alive
 
 # === CONFIG ===
-API_KEY = "99d39d59-c05d-4e40-9f2a-3615eac315ea"  # Thay bằng API key thật
-API_SECRET = "4B1D25C8F05E12717AD561584B2853E6"  # Thay bằng API secret thật
-PASSPHRASE = "Mmoarb2025@"  # Nếu có
+API_KEY = "99d39d59-c05d-4e40-9f2a-3615eac315ea"
+API_SECRET = "4B1D25C8F05E12717AD561584B2853E6"
+PASSPHRASE = "Mmoarb2025@"
 TELEGRAM_TOKEN = "7817283052:AAF2fjxxZT8LP-gblBeTbpb0N0-a0C7GLQ8"
 TELEGRAM_CHAT_ID = "5850622014"
 
 SYMBOL = "DOGE/USDT"
-TIMEFRAME = "5m"  # Dùng khung 5 phút để giảm false signal
-TP_PERCENT = 0.03  # Take Profit 3% (giảm từ 4% để an toàn)
-SL_PERCENT = 0.015  # Stop Loss 1.5% (giảm từ 2%)
-RISK_PER_TRADE = 0.05  # Chỉ rủi ro 5% vốn/lệnh (thay vì 15%)
+TIMEFRAME = "5m"
+TP_PERCENT = 0.03
+SL_PERCENT = 0.015
+RISK_PER_TRADE = 0.05
 
 bot = Bot(token=TELEGRAM_TOKEN)
 nest_asyncio.apply()
 
-trade_memory = {}  # Lưu trạng thái lệnh
+trade_memory = {}
 
 async def send_telegram(msg):
     try:
@@ -41,20 +41,18 @@ def create_exchange():
         'options': {'defaultType': 'spot'}
     })
 
-def fetch_ohlcv(exchange):
+async def fetch_ohlcv(exchange):
     try:
-        data = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=100)
+        data = await exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=100)
         df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True).dt.tz_convert('Asia/Ho_Chi_Minh')
         
-        # Tính chỉ báo
         df['ema_fast'] = df['close'].ewm(span=5, adjust=False).mean()
         df['ema_slow'] = df['close'].ewm(span=12, adjust=False).mean()
         df['ema_big'] = df['close'].ewm(span=30, adjust=False).mean()
         df['rsi14'] = compute_rsi(df['close'], 14)
-        df['volume_ma'] = df['volume'].rolling(10).mean()
+        df['volume_ma'] =_album.volume'].rolling(10).mean()
         
-        # MACD
         ema12 = df['close'].ewm(span=12, adjust=False).mean()
         ema26 = df['close'].ewm(span=26, adjust=False).mean()
         df['macd'] = ema12 - ema26
@@ -78,11 +76,6 @@ def should_buy(df):
     last_candle = df.iloc[-1]
     prev_candle = df.iloc[-2]
     
-    # Điều kiện mua:
-    # 1. EMA5 > EMA12 > EMA30 (xu hướng tăng)
-    # 2. RSI14 < 65 (tránh quá mua)
-    # 3. Volume hiện tại > trung bình 10 nến
-    # 4. MACD cắt lên Signal line
     return (
         last_candle['ema_fast'] > last_candle['ema_slow'] and
         last_candle['ema_slow'] > last_candle['ema_big'] and
@@ -94,8 +87,9 @@ def should_buy(df):
 
 async def analyze_and_trade():
     ex = create_exchange()
-    df = fetch_ohlcv(ex)
+    df = await fetch_ohlcv(ex)
     if df is None:
+        await ex.close()
         return
 
     price = df['close'].iloc[-1]
@@ -105,7 +99,6 @@ async def analyze_and_trade():
         buy_price = holding['buy_price']
         amount = holding['amount']
         
-        # Check Take Profit
         if price >= buy_price * (1 + TP_PERCENT):
             try:
                 await ex.create_market_sell_order(SYMBOL, amount)
@@ -119,7 +112,6 @@ async def analyze_and_trade():
             except Exception as e:
                 await send_telegram(f"❌ Lỗi khi TP SELL: {e}")
         
-        # Check Stop Loss
         elif price <= buy_price * (1 - SL_PERCENT):
             try:
                 await ex.create_market_sell_order(SYMBOL, amount)
@@ -133,12 +125,11 @@ async def analyze_and_trade():
             except Exception as e:
                 await send_telegram(f"❌ Lỗi khi SL SELL: {e}")
     
-    # Tín hiệu mua
     elif should_buy(df):
         try:
-            balance = ex.fetch_balance()
+            balance = await ex.fetch_balance()
             usdt_balance = float(balance['USDT']['free'])
-            if usdt_balance > 10:  # Ít nhất $10 để giao dịch
+            if usdt_balance > 10:
                 amount = round((usdt_balance * RISK_PER_TRADE) / price, 0)
                 if amount > 0:
                     order = await ex.create_market_buy_order(SYMBOL, amount)
@@ -155,14 +146,17 @@ async def analyze_and_trade():
                     )
         except Exception as e:
             await send_telegram(f"❌ Lỗi khi BUY: {str(e)}")
+    
+    await ex.close()
 
 async def log_portfolio():
     try:
         ex = create_exchange()
-        balance = ex.fetch_balance()
+        balance = await ex.fetch_balance()
         usdt = float(balance['USDT']['total'])
         doge = float(balance['DOGE']['total'])
-        price = (await ex.fetch_ticker(SYMBOL))['last']
+        ticker = await ex.fetch_ticker(SYMBOL)
+        price = ticker['last']
         total_value = usdt + (doge * price)
         
         await send_telegram(
@@ -171,6 +165,7 @@ async def log_portfolio():
             f"💵 USDT: {usdt:.2f}\n"
             f"💰 Tổng: {total_value:.2f} USDT"
         )
+        await ex.close()
     except Exception as e:
         await send_telegram(f"❌ Lỗi log_portfolio: {str(e)}")
 
