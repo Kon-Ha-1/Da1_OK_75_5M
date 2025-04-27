@@ -30,10 +30,11 @@ nest_asyncio.apply()
 
 trade_memory = {}
 loss_tracker = {symbol: {'count': 0, 'date': None} for symbol in SYMBOLS}
-capital = 75.0  # Vốn ban đầu
+capital = 0.0  # Sẽ được khởi tạo từ tổng tài sản
 daily_profit = 0.0
-daily_start_capital = capital
-last_day = datetime.now(timezone(timedelta(hours=7))).date()  # Múi giờ Việt Nam
+daily_start_capital = 0.0  # Sẽ được khởi tạo từ tổng tài sản
+last_day = None  # Sẽ được khởi tạo khi bot chạy
+is_first_run = True  # Đánh dấu lần chạy đầu tiên
 
 async def send_telegram(msg):
     try:
@@ -50,6 +51,35 @@ def create_exchange():
         'enableRateLimit': True,
         'options': {'defaultType': 'spot'}
     })
+
+async def initialize_capital(exchange):
+    global capital, daily_start_capital, last_day, is_first_run
+    try:
+        balance = await exchange.fetch_balance()
+        usdt = float(balance['USDT']['total'])
+        total_value = usdt
+        
+        for symbol in SYMBOLS:
+            coin = symbol.split('/')[0]
+            coin_balance = float(balance.get(coin, {}).get('total', 0))
+            if coin_balance > 0:
+                ticker = await exchange.fetch_ticker(symbol)
+                price = ticker['last']
+                total_value += coin_balance * price
+        
+        capital = total_value
+        daily_start_capital = total_value
+        last_day = datetime.now(timezone(timedelta(hours=7))).date()
+        is_first_run = False
+        
+        await send_telegram(
+            f"🚀 Bot khởi động - Vốn ban đầu: {capital:.2f} USDT\n"
+            f"🎯 Mục tiêu lợi nhuận: 3% mỗi ngày (tính từ 21:00 VN)"
+        )
+        return True
+    except Exception as e:
+        await send_telegram(f"❌ Lỗi khởi tạo vốn: {str(e)}")
+        return False
 
 async def fetch_ohlcv(exchange, symbol, timeframe='5m'):
     try:
@@ -151,7 +181,7 @@ def can_trade(symbol):
     return tracker['count'] < MAX_LOSSES_PER_DAY
 
 async def update_capital(exchange):
-    global capital, daily_profit, daily_start_capital, last_day
+    global capital, daily_profit, daily_start_capital, last_day, is_first_run
     try:
         balance = await exchange.fetch_balance()
         usdt = float(balance['USDT']['total'])
@@ -168,6 +198,10 @@ async def update_capital(exchange):
         now = datetime.now(timezone(timedelta(hours=7)))
         today = now.date()
         current_hour = now.hour
+        
+        # Bỏ qua kiểm tra lợi nhuận/lỗ trong ngày đầu tiên cho đến 21:00
+        if is_first_run:
+            return True
         
         # Kiểm tra ngày mới lúc 21:00 (9h PM VN)
         if today != last_day and current_hour >= 21:
@@ -324,6 +358,10 @@ async def runner():
     keep_alive()
     exchange = create_exchange()
     try:
+        if not await initialize_capital(exchange):
+            await send_telegram("🛑 Không thể khởi tạo vốn. Bot dừng.")
+            return
+        
         await send_telegram("🤖 Bot giao dịch đã khởi động! Chạy 24/7")
         schedule.every(15).seconds.do(lambda: asyncio.ensure_future(analyze_and_trade(exchange)))
         schedule.every(15).minutes.do(lambda: asyncio.ensure_future(log_portfolio(exchange)))
