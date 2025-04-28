@@ -164,12 +164,86 @@ async def log_assets(exchange):
         # Tính lợi nhuận
         profit_percent = ((total_value_usd - daily_start_capital_usd) / daily_start_capital_usd * 100) if daily_start_capital_usd > 0 else 0
 
-        # Log tài sản
-        if last_total_value_usd > 0.01 or abs(total_value_usd - last_total_value_usd) > 0.01:
+        # Log tài sản, chỉ hiển thị coin có giá trị > 0.1 USD
+        if last_total_value_usd is None or abs(total_value_usd - last_total_value_usd) > 0.01:
             msg = f"💰 Tổng tài sản: {total_value_usd:.2f} USD\n💵 USDT: {usdt:.2f}\n"
             for currency, data in coins.items():
-                msg += f"🪙 {currency}: {data['balance']:.4f} | Giá: {data['price']:.4f} | Giá trị: {data['value_usd']:.2f} USD\n"
-            msg += f"📈 Lợi nhuận 10).minutes.do(lambda: asyncio.ensure_future(log_assets(exchange)))
+                if data['value_usd'] > 0.1:  # Chỉ hiển thị coin có giá trị > 0.1 USD
+                    msg += f"🪙 {currency}: {data['balance']:.4f} | Giá: {data['price']:.4f} | Giá trị: {data['value_usd']:.2f} USD\n"
+            msg += f"📈 Lợi nhuận hôm nay: {profit_percent:.2f}%"
+            await send_telegram(msg)
+            last_total_value_usd = total_value_usd
+    except Exception as e:
+        await send_telegram(f"❌ Lỗi log tài sản: {str(e)}")
+
+async def predict_doge(exchange):
+    symbol = SYMBOLS[0]
+    df_5m = await fetch_ohlcv(exchange, symbol, '5m', limit=100)
+    df_15m = await fetch_ohlcv(exchange, symbol, '15m', limit=100)
+    df_1h = await fetch_ohlcv(exchange, symbol, '1h', limit=100)
+    if df_5m is None or df_15m is None or df_1h is None:
+        return
+
+    current_price = df_5m['close'].iloc[-1]
+    reasons = []
+    can_predict = True
+    trends = {}
+
+    # Kiểm tra điều kiện
+    if not is_strong_uptrend(df_5m) and not is_strong_downtrend(df_5m):
+        reasons.append("5m: Không có xu hướng rõ ràng (EMA5 ≈ EMA12)")
+        can_predict = False
+    if not is_strong_uptrend(df_15m) and not is_strong_downtrend(df_15m):
+        reasons.append("15m: Không có xu hướng rõ ràng (EMA5 ≈ EMA12)")
+        can_predict = False
+    if not is_market_safe(df_1h):
+        reasons.append("1h: Thị trường không an toàn (giá giảm >5%)")
+        can_predict = False
+    if not is_volatile_enough(df_5m, 0.003):
+        reasons.append("5m: Biến động thấp (ATR < 0.3%)")
+        can_predict = False
+
+    # Dự đoán
+    if can_predict:
+        # 15 phút (5m)
+        atr_5m = df_5m['atr'].iloc[-1] / current_price * 100
+        if should_increase(df_5m):
+            trends['15m'] = ("increase", min(atr_5m, 1.0))
+        elif should_decrease(df_5m):
+            trends['15m'] = ("decrease", min(atr_5m, 0.5))
+        
+        # 30 phút (15m)
+        atr_15m = df_15m['atr'].iloc[-1] / current_price * 100
+        if should_increase(df_15m):
+            trends['30m'] = ("increase", min(atr_15m, 1.5))
+        elif should_decrease(df_15m):
+            trends['30m'] = ("decrease", min(atr_15m, 0.75))
+        
+        # 1 giờ (1h)
+        atr_1h = df_1h['atr'].iloc[-1] / current_price * 100
+        if should_increase(df_1h):
+            trends['1h'] = ("increase", min(atr_1h, 2.0))
+        elif should_decrease(df_1h):
+            trends['1h'] = ("decrease", min(atr_1h, 1.0))
+
+    # Gửi thông báo
+    if not can_predict:
+        await send_telegram(f"⏳ {symbol}: Không dự đoán. Lý do: {', '.join(reasons)}")
+    elif trends:
+        prediction_msg = f"🔮 Dự đoán giá {symbol}:\n"
+        for timeframe, (trend, change) in trends.items():
+            if trend == "increase":
+                prediction_msg += f"📈 {timeframe}: TĂNG {change:.2f}% (dựa trên ATR: {locals()[f'atr_{timeframe.lower()}']:.2f}%)\n"
+            else:
+                prediction_msg += f"📉 {timeframe}: GIẢM {change:.2f}% (dựa trên ATR: {locals()[f'atr_{timeframe.lower()}']:.2f}%)\n"
+        await send_telegram(prediction_msg)
+
+async def runner():
+    keep_alive()
+    exchange = create_exchange()
+    await send_telegram("🤖 Bot dự đoán DOGE đã khởi động! Chạy 24/7")
+    #schedule.every(15).seconds.do(lambda: asyncio.ensure_future(predict_doge(exchange)))
+    schedule.every(10).minutes.do(lambda: asyncio.ensure_future(log_assets(exchange)))
     while True:
         schedule.run_pending()
         await asyncio.sleep(1)
