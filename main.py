@@ -205,4 +205,79 @@ async def trade_coin(exchange, symbol):
             can_trade = False
         if not is_volatile_enough(df_5m, 0.002):
             reasons.append("5m: Biến động thấp (ATR < 0.2%)")
-            can
+            can_trade = False
+        if not should_increase(df_5m):
+            reasons.append("5m: Không thỏa mãn tín hiệu tăng (EMA, RSI, MACD, Breakout)")
+            can_trade = False
+
+        if symbol not in active_orders and can_trade:
+            balance = await exchange.fetch_balance()
+            usdt = float(balance['total'].get('USDT', 0.0))
+            if usdt < 1.0:
+                await send_telegram(f"⚠️ Không đủ USDT để giao dịch {symbol}")
+                last_signal_check[symbol] = now
+                return
+
+            usdt_per_trade = usdt * 0.1
+            if usdt_per_trade < 1.0:
+                await send_telegram(f"⚠️ USDT quá thấp để chia lệnh: {usdt_per_trade:.2f}")
+                last_signal_check[symbol] = now
+                return
+
+            ticker = await exchange.fetch_ticker(symbol)
+            current_price = ticker['last']
+            amount = usdt_per_trade / current_price
+
+            order = await exchange.create_market_buy_order(symbol, amount)
+            await send_telegram(f"🟢 Mua {symbol}: {amount:.4f} coin | Giá: {current_price:.4f} | Tổng: {usdt_per_trade:.2f} USDT")
+
+            active_orders[symbol] = {
+                'buy_price': current_price,
+                'amount': amount,
+                'usdt': usdt_per_trade
+            }
+            last_signal_check[symbol] = now
+
+        elif not can_trade:
+            await send_telegram(f"⏳ {symbol}: Không mở lệnh. Lý do: {', '.join(reasons)}")
+            last_signal_check[symbol] = now
+
+        if symbol in active_orders:
+            order_info = active_orders[symbol]
+            buy_price = order_info['buy_price']
+            amount = order_info['amount']
+
+            ticker = await exchange.fetch_ticker(symbol)
+            current_price = ticker['last']
+            profit_percent = ((current_price - buy_price) / buy_price) * 100
+
+            if profit_percent >= 0.5 or profit_percent <= -0.3:
+                order = await exchange.create_market_sell_order(symbol, amount)
+                profit_usdt = (current_price - buy_price) * amount
+                await send_telegram(
+                    f"🔴 Bán {symbol}: {amount:.4f} coin | Giá: {current_price:.4f} | "
+                    f"Lợi nhuận: {profit_percent:.2f}% ({profit_usdt:.2f} USDT)"
+                )
+                del active_orders[symbol]
+                last_signal_check[symbol] = now
+
+    except Exception as e:
+        await send_telegram(f"❌ Lỗi giao dịch {symbol}: {str(e)}")
+        last_signal_check[symbol] = now
+
+async def trade_all_coins(exchange):
+    for symbol in SYMBOLS:
+        await trade_coin(exchange, symbol)
+
+async def runner():
+    keep_alive()
+    exchange = create_exchange()
+    await send_telegram("🤖 Bot giao dịch tự động đã khởi động! Mục tiêu: 2%/ngày")
+    schedule.every(15).seconds.do(lambda: asyncio.ensure_future(trade_all_coins(exchange)))
+    schedule.every(10).minutes.do(lambda: asyncio.ensure_future(log_assets(exchange)))
+    while True:
+        schedule.run_pending()
+        await asyncio.sleep(1)
+
+if __name__ == "__main__":
+    asyncio.run(runner())
