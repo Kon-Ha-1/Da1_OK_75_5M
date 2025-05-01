@@ -251,11 +251,15 @@ async def trade_coin(exchange, symbol):
             amount = usdt_per_trade / current_price
 
             order = await exchange.create_market_buy_order(symbol, amount)
-            await send_telegram(f"🟢 Mua {symbol}: {amount:.4f} coin | Giá: {current_price:.4f} | Tổng: {usdt_per_trade:.2f} USDT")
+            coin = symbol.split('/')[0]
+            balance = await exchange.fetch_balance()
+            actual_amount = float(balance['total'].get(coin, 0.0))
+            
+            await send_telegram(f"🟢 Mua {symbol}: {actual_amount:.4f} coin | Giá: {current_price:.4f} | Tổng: {usdt_per_trade:.2f} USDT")
 
             active_orders[symbol] = {
                 'buy_price': current_price,
-                'amount': amount,
+                'amount': actual_amount,
                 'usdt': usdt_per_trade
             }
             last_signal_check[symbol] = now
@@ -273,14 +277,24 @@ async def trade_coin(exchange, symbol):
             balance = await exchange.fetch_balance()
             coin_balance = float(balance['total'].get(coin, 0.0))
 
+            TOLERANCE = 0.001
             if coin_balance < amount:
-                await send_telegram(
-                    f"⚠️ Không thể bán {symbol}: Số dư {coin}: {coin_balance:.4f}, "
-                    f"nhưng cần {amount:.4f}. Xóa lệnh khỏi active_orders."
-                )
-                del active_orders[symbol]
-                last_signal_check[symbol] = now
-                return
+                diff = amount - coin_balance
+                diff_percent = (diff / amount) * 100
+                if diff_percent <= TOLERANCE:
+                    await send_telegram(
+                        f"⚠️ Điều chỉnh bán {symbol}: Số dư {coin}: {coin_balance:.4f}, "
+                        f"cần {amount:.4f}. Chênh lệch {diff:.4f} ({diff_percent:.2f}%). Bán theo số dư."
+                    )
+                    amount = coin_balance
+                else:
+                    await send_telegram(
+                        f"⚠️ Không thể bán {symbol}: Số dư {coin}: {coin_balance:.4f}, "
+                        f"nhưng cần {amount:.4f}. Xóa lệnh khỏi active_orders."
+                    )
+                    del active_orders[symbol]
+                    last_signal_check[symbol] = now
+                    return
 
             ticker = await exchange.fetch_ticker(symbol)
             current_price = ticker['last']
