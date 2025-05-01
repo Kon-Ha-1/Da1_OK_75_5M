@@ -15,7 +15,8 @@ TELEGRAM_TOKEN = "7817283052:AAF2fjxxZT8LP-gblBeTbpb0N0-a0C7GLQ8"
 TELEGRAM_CHAT_ID = "5850622014"
 
 SYMBOLS = ["DOGE/USDT", "BTC/USDT", "ETH/USDT", "XRP/USDT", "ARB/USDT", 
-           "SOL/USDT", "TRUMP/USDT", "BNB/USDT", "TRX/USDT", "MAGIC/USDT"]
+           "SOL/USDT", "TRUMP/USDT", "BNB/USDT", "TRX/USDT", "MAGIC/USDT",
+           "PEPE/USDT", "SHIB/USDT"]
 bot = Bot(token=TELEGRAM_TOKEN)
 nest_asyncio.apply()
 
@@ -23,6 +24,7 @@ last_total_value_usd = None
 daily_start_capital_usd = 0.0
 last_day = None
 active_orders = {}
+last_signal_check = {}
 
 async def send_telegram(msg):
     vn_time = datetime.now(timezone(timedelta(hours=7))).strftime('%H:%M:%S %d/%m/%Y')
@@ -94,7 +96,7 @@ def is_market_safe(df_1h):
     price_change = (last_candle['close'] - prev_candle['close']) / prev_candle['close']
     return price_change > -0.05
 
-def is_volatile_enough(df, threshold=0.003):
+def is_volatile_enough(df, threshold=0.002):
     last_candle = df.iloc[-1]
     atr_percent = last_candle['atr'] / last_candle['close']
     return atr_percent > threshold
@@ -175,80 +177,32 @@ async def log_assets(exchange):
         await send_telegram(f"❌ Lỗi log tài sản: {str(e)}")
 
 async def trade_coin(exchange, symbol):
-    global active_orders
+    global active_orders, last_signal_check
     try:
+        now = datetime.now(timezone(timedelta(hours=7)))
+        if symbol in last_signal_check:
+            last_check = last_signal_check[symbol]
+            if (now - last_check).total_seconds() < 300:
+                return
+
         df_5m = await fetch_ohlcv(exchange, symbol, '5m', limit=100)
         df_15m = await fetch_ohlcv(exchange, symbol, '15m', limit=100)
         df_1h = await fetch_ohlcv(exchange, symbol, '1h', limit=100)
         if df_5m is None or df_15m is None or df_1h is None:
             return
 
-        if (symbol not in active_orders and
-            is_strong_uptrend(df_5m) and
-            is_strong_uptrend(df_15m) and
-            is_strong_uptrend(df_1h) and
-            is_market_safe(df_1h) and
-            is_volatile_enough(df_5m, 0.003) and
-            should_increase(df_5m)):
+        reasons = []
+        can_trade = True
 
-            balance = await exchange.fetch_balance()
-            usdt = float(balance['total'].get('USDT', 0.0))
-            if usdt < 1.0:
-                await send_telegram(f"⚠️ Không đủ USDT để giao dịch {symbol}")
-                return
-
-            usdt_per_trade = usdt * 0.1
-            if usdt_per_trade < 1.0:
-                await send_telegram(f"⚠️ USDT quá thấp để chia lệnh: {usdt_per_trade:.2f}")
-                return
-
-            ticker = await exchange.fetch_ticker(symbol)
-            current_price = ticker['last']
-            amount = usdt_per_trade / current_price
-
-            order = await exchange.create_market_buy_order(symbol, amount)
-            await send_telegram(f"🟢 Mua {symbol}: {amount:.4f} coin | Giá: {current_price:.4f} | Tổng: {usdt_per_trade:.2f} USDT")
-
-            active_orders[symbol] = {
-                'buy_price': current_price,
-                'amount': amount,
-                'usdt': usdt_per_trade
-            }
-
-        if symbol in active_orders:
-            order_info = active_orders[symbol]
-            buy_price = order_info['buy_price']
-            amount = order_info['amount']
-
-            ticker = await exchange.fetch_ticker(symbol)
-            current_price = ticker['last']
-            profit_percent = ((current_price - buy_price) / buy_price) * 100
-
-            if profit_percent >= 0.5 or profit_percent <= -0.3:
-                order = await exchange.create_market_sell_order(symbol, amount)
-                profit_usdt = (current_price - buy_price) * amount
-                await send_telegram(
-                    f"🔴 Bán {symbol}: {amount:.4f} coin | Giá: {current_price:.4f} | "
-                    f"Lợi nhuận: {profit_percent:.2f}% ({profit_usdt:.2f} USDT)"
-                )
-                del active_orders[symbol]
-
-    except Exception as e:
-        await send_telegram(f"❌ Lỗi giao dịch {symbol}: {str(e)}")
-
-async def trade_all_coins(exchange):
-    for symbol in SYMBOLS:
-        await trade_coin(exchange, symbol)
-
-async def runner():
-    keep_alive()
-    exchange = create_exchange()
-    await send_telegram("🤖 Bot giao dịch tự động đã khởi động! Mục tiêu: 2%/ngày")
-    schedule.every(30).seconds.do(lambda: asyncio.ensure_future(trade_all_coins(exchange)))
-    schedule.every(10).minutes.do(lambda: asyncio.ensure_future(log_assets(exchange)))
-    while True:
-        schedule.run_pending()
-        await asyncio.sleep(1)
-
-if __name__ == "__main__":
-    asyncio.run(runner())
+        if not is_strong_uptrend(df_5m):
+            reasons.append("5m: Không có xu hướng tăng (EMA5 < EMA12)")
+            can_trade = False
+        if not is_strong_uptrend(df_15m):
+            reasons.append("15m: Không có xu hướng tăng (EMA5 < EMA12)")
+            can_trade = False
+        if not is_market_safe(df_1h):
+            reasons.append("1h: Thị trường không an toàn (giá giảm >5%)")
+            can_trade = False
+        if not is_volatile_enough(df_5m, 0.002):
+            reasons.append("5m: Biến động thấp (ATR < 0.2%)")
+            can
