@@ -48,7 +48,7 @@ async def fetch_usdt_usd_rate(exchange):
 
 async def fetch_ohlcv(exchange, symbol, timeframe, limit=100):
     try:
-        data = await exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=100)
+        data = await exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True).dt.tz_convert('Asia/Ho_Chi_Minh')
         
@@ -90,9 +90,9 @@ def is_strong_downtrend(df):
     last_candle = df.iloc[-1]
     return last_candle['ema_fast'] < last_candle['ema_slow']
 
-def is_market_safe(df_1h):
-    last_candle = df_1h.iloc[-1]
-    prev_candle = df_1h.iloc[-2]
+def is_market_safe(df):
+    last_candle = df.iloc[-1]
+    prev_candle = df.iloc[-2]
     price_change = (last_candle['close'] - prev_candle['close']) / prev_candle['close']
     return price_change > -0.05
 
@@ -101,35 +101,31 @@ def is_volatile_enough(df, threshold=0.002):
     atr_percent = last_candle['atr'] / last_candle['close']
     return atr_percent > threshold
 
-def should_increase(df):
-    last_candle = df.iloc[-1]
-    prev_candle = df.iloc[-2]
-    trend_strategy = (
+def should_increase(df_5m):
+    last_candle = df_5m.iloc[-1]
+    prev_candle = df_5m.iloc[-2]
+    return (
         last_candle['ema_fast'] > last_candle['ema_slow'] and
-        last_candle['rsi14'] < 70 and
+        30 < last_candle['rsi14'] < 70 and
         last_candle['macd'] > last_candle['signal'] and
         prev_candle['macd'] <= prev_candle['signal']
-    )
-    breakout_strategy = (
+    ) or (
         last_candle['close'] > prev_candle['resistance'] and
         last_candle['volume'] > last_candle['volume_ma']
     )
-    return trend_strategy or breakout_strategy
 
 def should_decrease(df):
     last_candle = df.iloc[-1]
     prev_candle = df.iloc[-2]
-    trend_strategy = (
+    return (
         last_candle['ema_fast'] < last_candle['ema_slow'] and
         last_candle['rsi14'] > 30 and
         last_candle['macd'] < last_candle['signal'] and
         prev_candle['macd'] >= prev_candle['signal']
-    )
-    breakdown_strategy = (
+    ) or (
         last_candle['close'] < prev_candle['low'].rolling(20).min() and
         last_candle['volume'] > last_candle['volume_ma']
     )
-    return trend_strategy or breakdown_strategy
 
 async def log_assets(exchange):
     global daily_start_capital_usd, last_day, last_total_value_usd
@@ -204,13 +200,12 @@ async def trade_coin(exchange, symbol):
         now = datetime.now(timezone(timedelta(hours=7)))
         if symbol in last_signal_check:
             last_check = last_signal_check[symbol]
-            if (now - last_check).total_seconds() < 300:
+            if (now - last_check).total_seconds() < 10:
                 return
 
         df_5m = await fetch_ohlcv(exchange, symbol, '5m', limit=100)
-        df_15m = await fetch_ohlcv(exchange, symbol, '15m', limit=100)
         df_1h = await fetch_ohlcv(exchange, symbol, '1h', limit=100)
-        if df_5m is None or df_15m is None or df_1h is None:
+        if df_5m is None or df_1h is None:
             return
 
         reasons = []
@@ -218,9 +213,6 @@ async def trade_coin(exchange, symbol):
 
         if not is_strong_uptrend(df_5m):
             reasons.append("5m: Không có xu hướng tăng (EMA5 < EMA12)")
-            can_trade = False
-        if not is_strong_uptrend(df_15m):
-            reasons.append("15m: Không có xu hướng tăng (EMA5 < EMA12)")
             can_trade = False
         if not is_market_safe(df_1h):
             reasons.append("1h: Thị trường không an toàn (giá giảm >5%)")
@@ -289,18 +281,17 @@ async def trade_coin(exchange, symbol):
                     amount = coin_balance
                 else:
                     await send_telegram(
-                        f"⚠️ Không thể bán {symbol}: Số dư {coin}: {coin_balance:.4f}, "
-                        f"nhưng cần {amount:.4f}. Xóa lệnh khỏi active_orders."
+                        f"⚠️ Điều chỉnh bán {symbol}: Số dư {coin}: {coin_balance:.4f}, "
+                        f"nhưng cần {amount:.4f}. Bán với số dư hiện có."
                     )
-                    del active_orders[symbol]
-                    last_signal_check[symbol] = now
-                    return
+                    amount = coin_balance
 
             ticker = await exchange.fetch_ticker(symbol)
             current_price = ticker['last']
             profit_percent = ((current_price - buy_price) / buy_price) * 100
+            price_change = ((current_price - buy_price) / buy_price) * 100
 
-            if profit_percent >= 0.5 or profit_percent <= -0.3:
+            if price_change >= 0.3 or price_change <= -0.2:  # Bán khi tăng 0.3% hoặc giảm 0.2%
                 await send_telegram(
                     f"📤 Chuẩn bị bán {symbol}: {amount:.4f} coin | "
                     f"Giá mua: {buy_price:.4f} | Giá hiện tại: {current_price:.4f}"
@@ -318,9 +309,12 @@ async def trade_coin(exchange, symbol):
         error_msg = str(e)
         if "51008" in error_msg:
             await send_telegram(
-                f"⚠️ Lỗi 51008 khi bán {symbol}: Số dư {coin} không đủ. Xóa lệnh khỏi active_orders."
+                f"⚠️ Lỗi 51008 khi bán {symbol}: Số dư {coin} không đủ. Bán với số dư hiện có."
             )
             if symbol in active_orders:
+                balance = await exchange.fetch_balance()
+                coin_balance = float(balance['total'].get(coin, 0.0))
+                order = await exchange.create_market_sell_order(symbol, coin_balance)
                 del active_orders[symbol]
         else:
             await send_telegram(f"❌ Lỗi giao dịch {symbol}: {error_msg}")
@@ -338,7 +332,7 @@ async def runner():
     await send_telegram("🔄 Đang đồng bộ active_orders...")
     await sync_active_orders(exchange)
     
-    schedule.every(15).seconds.do(lambda: asyncio.ensure_future(trade_all_coins(exchange)))
+    schedule.every(10).seconds.do(lambda: asyncio.ensure_future(trade_all_coins(exchange)))  # Kiểm tra mỗi 10 giây
     schedule.every(10).minutes.do(lambda: asyncio.ensure_future(log_assets(exchange)))
     while True:
         schedule.run_pending()
