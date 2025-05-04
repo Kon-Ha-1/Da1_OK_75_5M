@@ -14,9 +14,7 @@ PASSPHRASE = "Mmoarb2025@"
 TELEGRAM_TOKEN = "7817283052:AAF2fjxxZT8LP-gblBeTbpb0N0-a0C7GLQ8"
 TELEGRAM_CHAT_ID = "5850622014"
 
-SYMBOLS = ["DOGE/USDT", "BTC/USDT", "ETH/USDT", "XRP/USDT", "ARB/USDT", 
-           "SOL/USDT", "TRUMP/USDT", "BNB/USDT", "TRX/USDT", "MAGIC/USDT",
-           "PEPE/USDT", "SHIB/USDT"]
+SYMBOLS = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT"]  # Giảm xuống 5 coin
 bot = Bot(token=TELEGRAM_TOKEN)
 nest_asyncio.apply()
 
@@ -100,17 +98,19 @@ def is_volatile_enough(df, threshold=0.002):
     atr_percent = last_candle['atr'] / last_candle['close']
     return atr_percent > threshold
 
-def should_increase(df_5m):
-    last_candle = df_5m.iloc[-1]
-    prev_candle = df_5m.iloc[-2]
+def should_increase(df_5m, df_1h):
+    last_5m = df_5m.iloc[-1]
+    prev_5m = df_5m.iloc[-2]
+    last_1h = df_1h.iloc[-1]
     return (
-        last_candle['ema_fast'] > last_candle['ema_slow'] and
-        30 < last_candle['rsi14'] < 70 and
-        last_candle['macd'] > last_candle['signal'] and
-        prev_candle['macd'] <= prev_candle['signal']
+        last_5m['ema_fast'] > last_5m['ema_slow'] and
+        last_1h['ema_fast'] > last_1h['ema_slow'] and
+        last_5m['rsi14'] < 60 and  # Thắt chặt RSI
+        last_5m['macd'] > last_5m['signal'] and
+        prev_5m['macd'] <= prev_5m['signal']
     ) or (
-        last_candle['close'] > prev_candle['resistance'] and
-        last_candle['volume'] > last_candle['volume_ma']
+        last_5m['close'] > prev_5m['resistance'] and
+        last_5m['volume'] > last_5m['volume_ma']
     )
 
 def should_decrease(df):
@@ -211,15 +211,15 @@ async def trade_coin(exchange, symbol):
             can_trade = False
         if not is_volatile_enough(df_5m, 0.002):
             can_trade = False
-        if not should_increase(df_5m):
+        if not should_increase(df_5m, df_1h):
             can_trade = False
 
-        if symbol not in active_orders and can_trade:
+        if symbol not in active_orders and can_trade and len(active_orders) < 3:
             balance = await exchange.fetch_balance()
             usdt = float(balance['total'].get('USDT', 0.0))
             if usdt < 1.0:
                 return
-            usdt_per_trade = usdt * 0.1
+            usdt_per_trade = usdt * 0.2  # Tăng lên 20%
             if usdt_per_trade < 1.0:
                 return
 
@@ -263,7 +263,7 @@ async def trade_coin(exchange, symbol):
             current_price = ticker['last']
             price_change = ((current_price - buy_price) / buy_price) * 100
 
-            if price_change >= 0.3 or price_change <= -0.2:
+            if price_change >= 0.5 or price_change <= -0.3:  # Tăng ngưỡng
                 await send_telegram(
                     f"📤 Chuẩn bị bán {symbol}: {amount:.4f} coin | "
                     f"Giá mua: {buy_price:.4f} | Giá hiện tại: {current_price:.4f}"
