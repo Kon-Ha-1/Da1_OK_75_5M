@@ -100,8 +100,8 @@ async def trade_all_coins(exchange):
 
 async def trade_coin(exchange, symbol):
     if await is_symbol_crashing(exchange, symbol):
-    await send_telegram(f"⚠️ {symbol} đang dump >2%. Bỏ qua.")
-    return
+        await send_telegram(f"⚠️ {symbol} đang dump >2%. Bỏ qua.")
+        return
 
     global active_orders, last_signal_check, trade_history
     try:
