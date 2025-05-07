@@ -21,10 +21,9 @@ nest_asyncio.apply()
 last_total_value_usd = None
 daily_start_capital_usd = 0.0
 last_day = None
-active_orders = {}
-last_signal_check = {}
-btc_dump_until = None
-trade_history = []
+active_order = None  # Chỉ hold 1 coin tại 1 thời điểm
+lowest_prices = {}  # Lưu giá đáy 7 ngày trước của từng coin
+safe_coins = {}  # Lưu coin không dump mạnh trong 1-2 ngày gần nhất
 
 async def send_telegram(msg):
     vn_time = datetime.now(timezone(timedelta(hours=7))).strftime('%H:%M:%S %d/%m/%Y')
@@ -39,120 +38,6 @@ def create_exchange():
         'options': {'defaultType': 'spot'}
     })
 
-async def fetch_ohlcv(exchange, symbol, timeframe, limit=100):
-    try:
-        data = await exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True).dt.tz_convert('Asia/Ho_Chi_Minh')
-        df['ema_fast'] = df['close'].ewm(span=5, adjust=False).mean()
-        df['ema_slow'] = df['close'].ewm(span=12, adjust=False).mean()
-        df['rsi14'] = compute_rsi(df['close'], 14)
-        df['resistance'] = df['high'].rolling(20).max()
-        df['volume_ma'] = df['volume'].rolling(10).mean()
-        ema12 = df['close'].ewm(span=12, adjust=False).mean()
-        ema26 = df['close'].ewm(span=26, adjust=False).mean()
-        df['macd'] = ema12 - ema26
-        df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-        df['tr'] = pd.concat([df['high'] - df['low'],
-                              (df['high'] - df['close'].shift()).abs(),
-                              (df['low'] - df['close'].shift()).abs()], axis=1).max(axis=1)
-        df['atr'] = df['tr'].rolling(14).mean()
-        return df
-    except Exception:
-        return None
-
-def compute_rsi(series, period):
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.rolling(window=period).mean()
-    avg_loss = loss.rolling(window=period).mean()
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-def is_strong_uptrend(df): return df.iloc[-1]['ema_fast'] > df.iloc[-1]['ema_slow']
-def is_market_safe(df): return (df.iloc[-1]['close'] - df.iloc[-2]['close']) / df.iloc[-2]['close'] > -0.05
-def is_volatile_enough(df, threshold=0.002): return df.iloc[-1]['atr'] / df.iloc[-1]['close'] > threshold
-
-def should_increase(df_5m, df_1h):
-    last_5m, prev_5m = df_5m.iloc[-1], df_5m.iloc[-2]
-    last_1h = df_1h.iloc[-1]
-    return (
-        last_5m['ema_fast'] > last_5m['ema_slow'] and
-        last_1h['ema_fast'] > last_1h['ema_slow'] and
-        last_5m['macd'] > last_5m['signal'] and
-        prev_5m['macd'] <= prev_5m['signal']
-    ) or (
-        last_5m['close'] > prev_5m['resistance'] and
-        last_5m['volume'] > last_5m['volume_ma']
-    )
-
-async def is_symbol_crashing(exchange, symbol):
-    df = await fetch_ohlcv(exchange, symbol, '1h', limit=2)
-    if df is None: return True
-    drop = (df.iloc[-1]['close'] - df.iloc[-2]['close']) / df.iloc[-2]['close']
-    return drop <= -0.02
-
-async def trade_all_coins(exchange):
-    for symbol in SYMBOLS:
-        await trade_coin(exchange, symbol)
-
-
-async def trade_coin(exchange, symbol):
-    if await is_symbol_crashing(exchange, symbol):
-        await send_telegram(f"⚠️ {symbol} đang dump >2%. Bỏ qua.")
-        return
-
-    global active_orders, last_signal_check, trade_history
-    try:
-        now = datetime.now(timezone(timedelta(hours=7)))
-        if symbol in last_signal_check and (now - last_signal_check[symbol]).total_seconds() < 10:
-            return
-        df_5m = await fetch_ohlcv(exchange, symbol, '5m', 100)
-        df_1h = await fetch_ohlcv(exchange, symbol, '1h', 100)
-        if not all([df_5m is not None, df_1h is not None]): return
-        can_trade = is_strong_uptrend(df_5m) and is_market_safe(df_1h) and is_volatile_enough(df_5m) and should_increase(df_5m, df_1h)
-        if symbol not in active_orders and can_trade and len(active_orders) < 3:
-            balance = await exchange.fetch_balance()
-            usdt = float(balance['total'].get('USDT', 0.0))
-            recent_win = [p for p in trade_history[-2:] if p >= 0.5]
-            usdt_per_trade = usdt * (0.3 if len(recent_win) == 2 else 0.2)
-            if usdt_per_trade < 1: return
-            ticker = await exchange.fetch_ticker(symbol)
-            current_price = ticker['last']
-            amount = usdt_per_trade / current_price
-            await exchange.create_market_buy_order(symbol, amount)
-            coin = symbol.split('/')[0]
-            actual_amount = float((await exchange.fetch_balance())['total'].get(coin, 0.0))
-            await send_telegram(f"🟢 Mua {symbol}: {actual_amount:.4f} | Giá: {current_price:.4f} | Tổng: {usdt_per_trade:.2f} USDT")
-            active_orders[symbol] = {'buy_price': current_price, 'amount': actual_amount, 'usdt': usdt_per_trade, 'peak_price': current_price}
-            last_signal_check[symbol] = now
-        elif symbol in active_orders:
-            o = active_orders[symbol]
-            ticker = await exchange.fetch_ticker(symbol)
-            current_price = ticker['last']
-            buy_price, amount = o['buy_price'], o['amount']
-            if current_price > o['peak_price']: o['peak_price'] = current_price
-            trailing = ((o['peak_price'] - current_price) / o['peak_price']) * 100
-            price_change = ((current_price - buy_price) / buy_price) * 100
-            stop_loss = ((buy_price - current_price) / buy_price) * 100
-            sell_reason = None
-            if price_change >= 0.5 and trailing >= 0.2: sell_reason = "Trailing stop"
-            elif price_change >= 1.5: sell_reason = "Lợi nhuận cao"
-            elif stop_loss >= 0.3: sell_reason = "Cắt lỗ"
-            if sell_reason:
-                await send_telegram(f"📤 Bán {symbol}: {amount:.4f} coin | Giá: {current_price:.4f} | Lý do: {sell_reason}")
-                await exchange.create_market_sell_order(symbol, amount)
-                profit_usdt = (current_price - buy_price) * amount
-                await send_telegram(f"🔴 Lợi nhuận: {price_change:.2f}% ({profit_usdt:.2f} USDT)")
-                trade_history.append(price_change)
-                if len(trade_history) > 10: trade_history.pop(0)
-                del active_orders[symbol]
-                last_signal_check[symbol] = now
-    except Exception as e:
-        await send_telegram(f"❌ Lỗi giao dịch {symbol}: {str(e)}")
-        last_signal_check[symbol] = now
-
 async def fetch_usdt_usd_rate(exchange):
     try:
         ticker = await exchange.fetch_ticker("USDT/USD")
@@ -160,49 +45,215 @@ async def fetch_usdt_usd_rate(exchange):
     except Exception:
         return 1.0
 
+async def fetch_ohlcv(exchange, symbol, timeframe, limit=100):
+    try:
+        data = await exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True).dt.tz_convert('Asia/Ho_Chi_Minh')
+        
+        df['ema_fast'] = df['close'].ewm(span=5, adjust=False).mean()
+        df['ema_slow'] = df['close'].ewm(span=12, adjust=False).mean()
+        df['rsi14'] = compute_rsi(df['close'], 14)
+        df['resistance'] = df['high'].rolling(20).max()
+        df['volume_ma'] = df['volume'].rolling(10).mean()
+        
+        ema12 = df['close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['close'].ewm(span=26, adjust=False).mean()
+        df['macd'] = ema12 - ema26
+        df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+        
+        return df
+    except Exception as e:
+        return None
+
+async def get_lowest_price_7d(exchange, symbol):
+    try:
+        df = await fetch_ohlcv(exchange, symbol, '1d', limit=7)
+        if df is None or len(df) < 7:
+            return None
+        return df['low'].min()
+    except Exception as e:
+        return None
+
+async def check_recent_dump(exchange, symbol):
+    try:
+        df = await fetch_ohlcv(exchange, symbol, '1d', limit=3)  # Lấy 3 ngày để tính 2 ngày gần nhất
+        if df is None or len(df) < 3:
+            return False
+        for i in range(-2, 0):  # Kiểm tra 2 ngày gần nhất
+            price_change = (df['close'].iloc[i] - df['close'].iloc[i-1]) / df['close'].iloc[i-1] * 100
+            if price_change <= -10:  # Dump >10%
+                return False
+        return True
+    except Exception as e:
+        return False
+
+def is_near_lowest_price(current_price, lowest_price, threshold=0.02):
+    return current_price <= lowest_price * (1 + threshold)
+
+def is_at_peak(df_5m):
+    last_candle = df_5m.iloc[-1]
+    prev_candle = df_5m.iloc[-2]
+    return (
+        last_candle['rsi14'] > 70 or  # RSI quá mua
+        (last_candle['macd'] < last_candle['signal'] and prev_candle['macd'] >= prev_candle['signal']) or  # MACD đảo chiều
+        last_candle['close'] >= last_candle['resistance']  # Chạm kháng cự
+    )
+
 async def log_assets(exchange):
     global daily_start_capital_usd, last_day, last_total_value_usd
     try:
         balance = await exchange.fetch_balance()
-        total_value_usdt = float(balance['total'].get('USDT', 0.0))
+        total_value_usdt = 0.0
         usdt_usd_rate = await fetch_usdt_usd_rate(exchange)
+
+        usdt = float(balance['total'].get('USDT', 0.0))
+        total_value_usdt = usdt
+
         coins = {}
         for currency in balance['total']:
-            if currency != 'USDT':
-                coin_balance = float(balance['total'].get(currency, 0.0))
-                if coin_balance > 0:
-                    try:
-                        ticker = await exchange.fetch_ticker(f"{currency}/USDT")
-                        price = ticker['last']
-                        value = coin_balance * price
-                        total_value_usdt += value
-                        coins[currency] = {'balance': coin_balance, 'price': price, 'value_usd': value * usdt_usd_rate}
-                    except: pass
+            coin_balance = float(balance['total'].get(currency, 0.0))
+            if coin_balance > 0 and currency != 'USDT':
+                try:
+                    symbol = f"{currency}/USDT"
+                    ticker = await exchange.fetch_ticker(symbol)
+                    price = ticker['last']
+                    coin_value = coin_balance * price
+                    total_value_usdt += coin_value
+                    coins[currency] = {'balance': coin_balance, 'price': price, 'value_usd': coin_value * usdt_usd_rate}
+                except Exception:
+                    continue
+
         total_value_usd = total_value_usdt * usdt_usd_rate
+
         now = datetime.now(timezone(timedelta(hours=7)))
         today = now.date()
         if last_day is None or (today != last_day and now.hour >= 21):
             daily_start_capital_usd = total_value_usd
             last_day = today
+
         profit_percent = ((total_value_usd - daily_start_capital_usd) / daily_start_capital_usd * 100) if daily_start_capital_usd > 0 else 0
+
         if last_total_value_usd is None or abs(total_value_usd - last_total_value_usd) > 0.01:
-            msg = f"💰 Tổng tài sản: {total_value_usd:.2f} USD\n💵 USDT: {balance['total'].get('USDT', 0.0):.2f}\n"
-            for c, d in coins.items():
-                if d['value_usd'] > 0.1:
-                    msg += f"🪙 {c}: {d['balance']:.4f} | Giá: {d['price']:.4f} | Giá trị: {d['value_usd']:.2f} USD\n"
+            msg = f"💰 Tổng tài sản: {total_value_usd:.2f} USD\n💵 USDT: {usdt:.2f}\n"
+            for currency, data in coins.items():
+                if data['value_usd'] > 0.1:
+                    msg += f"🪙 {currency}: {data['balance']:.4f} | Giá: {data['price']:.4f} | Giá trị: {data['value_usd']:.2f} USD\n"
             msg += f"📈 Lợi nhuận hôm nay: {profit_percent:.2f}%"
             await send_telegram(msg)
-            if now.hour == 21 and now.minute < 10:
-                await send_telegram(f"📊 Báo cáo cuối ngày\n📅 Ngày: {today}\n💼 Vốn đầu ngày: {daily_start_capital_usd:.2f} USD\n💰 Tổng hiện tại: {total_value_usd:.2f} USD\n📈 Lợi nhuận hôm nay: {profit_percent:.2f}%")
             last_total_value_usd = total_value_usd
     except Exception as e:
         await send_telegram(f"❌ Lỗi log tài sản: {str(e)}")
 
+async def trade_coin(exchange, symbol):
+    global active_order, lowest_prices, safe_coins
+    try:
+        if symbol not in lowest_prices:
+            lowest_price = await get_lowest_price_7d(exchange, symbol)
+            if lowest_price is None:
+                return
+            lowest_prices[symbol] = lowest_price
+
+        if symbol not in safe_coins:
+            is_safe = await check_recent_dump(exchange, symbol)
+            safe_coins[symbol] = is_safe
+            if not is_safe:
+                return
+
+        if not safe_coins[symbol]:
+            return
+
+        lowest_price = lowest_prices[symbol]
+
+        if active_order is None:  # Chưa có lệnh nào, kiểm tra mua
+            ticker = await exchange.fetch_ticker(symbol)
+            current_price = ticker['last']
+            
+            if is_near_lowest_price(current_price, lowest_price):
+                balance = await exchange.fetch_balance()
+                usdt = float(balance['total'].get('USDT', 0.0))
+                if usdt < 1.0:
+                    return
+
+                amount = usdt / current_price
+                order = await exchange.create_market_buy_order(symbol, amount)
+                coin = symbol.split('/')[0]
+                balance = await exchange.fetch_balance()
+                actual_amount = float(balance['total'].get(coin, 0.0))
+                
+                await send_telegram(f"🟢 Mua {symbol}: {actual_amount:.4f} coin | Giá: {current_price:.4f} | Tổng: {usdt:.2f} USDT")
+
+                active_order = {
+                    'symbol': symbol,
+                    'buy_price': current_price,
+                    'amount': actual_amount,
+                    'usdt': usdt
+                }
+
+        elif active_order['symbol'] == symbol:  # Đã mua, kiểm tra bán
+            df_5m = await fetch_ohlcv(exchange, symbol, '5m', limit=100)
+            if df_5m is None:
+                return
+
+            ticker = await exchange.fetch_ticker(symbol)
+            current_price = ticker['last']
+            profit_percent = ((current_price - active_order['buy_price']) / active_order['buy_price']) * 100
+
+            coin = symbol.split('/')[0]
+            balance = await exchange.fetch_balance()
+            coin_balance = float(balance['total'].get(coin, 0.0))
+            amount = active_order['amount']
+
+            TOLERANCE = 0.001
+            if coin_balance < amount:
+                diff = amount - coin_balance
+                diff_percent = (diff / amount) * 100
+                if diff_percent <= TOLERANCE:
+                    amount = coin_balance
+                else:
+                    amount = coin_balance
+
+            should_sell = (
+                profit_percent >= 2 or  # Lãi 2-5%
+                profit_percent <= -10 or  # Cắt lỗ 10%
+                is_at_peak(df_5m)  # Dự đoán đạt đỉnh
+            )
+
+            if should_sell:
+                order = await exchange.create_market_sell_order(symbol, amount)
+                profit_usdt = (current_price - active_order['buy_price']) * amount
+                await send_telegram(
+                    f"🔴 Bán {symbol}: {amount:.4f} coin | Giá: {current_price:.4f} | "
+                    f"Lợi nhuận: {profit_percent:.2f}% ({profit_usdt:.2f} USDT)"
+                )
+                active_order = None
+
+    except Exception as e:
+        error_msg = str(e)
+        if "51008" in error_msg and active_order:
+            balance = await exchange.fetch_balance()
+            coin = symbol.split('/')[0]
+            coin_balance = float(balance['total'].get(coin, 0.0))
+            order = await exchange.create_market_sell_order(symbol, coin_balance)
+            await send_telegram(
+                f"⚠️ Lỗi 51008 khi bán {symbol}: Số dư không đủ. Đã bán {coin_balance:.4f} coin."
+            )
+            active_order = None
+        else:
+            await send_telegram(f"❌ Lỗi giao dịch {symbol}: {error_msg}")
+
+async def trade_all_coins(exchange):
+    global active_order
+    for symbol in SYMBOLS:
+        if active_order is None or active_order['symbol'] == symbol:
+            await trade_coin(exchange, symbol)
+
 async def runner():
     keep_alive()
     exchange = create_exchange()
-    await send_telegram("🤖 Bot giao dịch tự động đã khởi động! Mục tiêu: 2%/ngày")
-    schedule.every(10).seconds.do(lambda: asyncio.ensure_future(trade_all_coins(exchange)))
+    await send_telegram("🤖 Bot giao dịch tự động đã khởi động! Chiến lược: Mua giá đáy, bán 2-5% hoặc dự đoán đỉnh")
+    
+    schedule.every(1).minutes.do(lambda: asyncio.ensure_future(trade_all_coins(exchange)))
     schedule.every(10).minutes.do(lambda: asyncio.ensure_future(log_assets(exchange)))
     while True:
         schedule.run_pending()
