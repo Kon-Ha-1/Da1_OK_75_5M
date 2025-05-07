@@ -87,26 +87,22 @@ def should_increase(df_5m, df_1h):
         last_5m['volume'] > last_5m['volume_ma']
     )
 
-async def is_btc_crashing(exchange):
-    global btc_dump_until
-    now = datetime.now(timezone(timedelta(hours=7)))
-    if btc_dump_until and now < btc_dump_until:
-        return True
-    df_btc = await fetch_ohlcv(exchange, "BTC/USDT", "1h", limit=2)
-    if df_btc is None: return False
-    drop = (df_btc.iloc[-1]['close'] - df_btc.iloc[-2]['close']) / df_btc.iloc[-2]['close']
-    if drop <= -0.02:
-        btc_dump_until = now + timedelta(hours=1)
-        await send_telegram(f"🚨 BTC dump mạnh ({drop*100:.2f}%), tạm dừng giao dịch đến {btc_dump_until.strftime('%H:%M')}")
-        return True
-    return False
+async def is_symbol_crashing(exchange, symbol):
+    df = await fetch_ohlcv(exchange, symbol, '1h', limit=2)
+    if df is None: return True
+    drop = (df.iloc[-1]['close'] - df.iloc[-2]['close']) / df.iloc[-2]['close']
+    return drop <= -0.02
 
 async def trade_all_coins(exchange):
-    if await is_btc_crashing(exchange): return
     for symbol in SYMBOLS:
         await trade_coin(exchange, symbol)
 
+
 async def trade_coin(exchange, symbol):
+    if await is_symbol_crashing(exchange, symbol):
+    await send_telegram(f"⚠️ {symbol} đang dump >2%. Bỏ qua.")
+    return
+
     global active_orders, last_signal_check, trade_history
     try:
         now = datetime.now(timezone(timedelta(hours=7)))
