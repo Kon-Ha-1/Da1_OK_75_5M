@@ -21,9 +21,9 @@ nest_asyncio.apply()
 last_total_value_usd = None
 daily_start_capital_usd = 0.0
 last_day = None
-active_order = None  # Chỉ hold 1 coin tại 1 thời điểm
-lowest_prices = {}  # Lưu giá đáy 7 ngày trước của từng coin
-safe_coins = {}  # Lưu coin không dump mạnh trong 1-2 ngày gần nhất
+active_order = None
+lowest_prices = {}
+safe_coins = {}
 
 async def send_telegram(msg):
     vn_time = datetime.now(timezone(timedelta(hours=7))).strftime('%H:%M:%S %d/%m/%Y')
@@ -77,27 +77,27 @@ async def get_lowest_price_7d(exchange, symbol):
 
 async def check_recent_dump(exchange, symbol):
     try:
-        df = await fetch_ohlcv(exchange, symbol, '1d', limit=3)  # Lấy 3 ngày để tính 2 ngày gần nhất
+        df = await fetch_ohlcv(exchange, symbol, '1d', limit=3)
         if df is None or len(df) < 3:
             return False
-        for i in range(-2, 0):  # Kiểm tra 2 ngày gần nhất
+        for i in range(-2, 0):
             price_change = (df['close'].iloc[i] - df['close'].iloc[i-1]) / df['close'].iloc[i-1] * 100
-            if price_change <= -10:  # Dump >10%
+            if price_change <= -10:
                 return False
         return True
     except Exception as e:
         return False
 
-def is_near_lowest_price(current_price, lowest_price, threshold=0.02):
+def is_near_lowest_price(current_price, lowest_price, threshold=0.05):  # Nới rộng ngưỡng từ 0.02 lên 0.05
     return current_price <= lowest_price * (1 + threshold)
 
 def is_at_peak(df_5m):
     last_candle = df_5m.iloc[-1]
     prev_candle = df_5m.iloc[-2]
     return (
-        last_candle['rsi14'] > 70 or  # RSI quá mua
-        (last_candle['macd'] < last_candle['signal'] and prev_candle['macd'] >= prev_candle['signal']) or  # MACD đảo chiều
-        last_candle['close'] >= last_candle['resistance']  # Chạm kháng cự
+        last_candle['rsi14'] > 70 or
+        (last_candle['macd'] < last_candle['signal'] and prev_candle['macd'] >= prev_candle['signal']) or
+        last_candle['close'] >= last_candle['resistance']
     )
 
 async def log_assets(exchange):
@@ -165,7 +165,7 @@ async def trade_coin(exchange, symbol):
 
         lowest_price = lowest_prices[symbol]
 
-        if active_order is None:  # Chưa có lệnh nào, kiểm tra mua
+        if active_order is None:
             ticker = await exchange.fetch_ticker(symbol)
             current_price = ticker['last']
             
@@ -190,7 +190,7 @@ async def trade_coin(exchange, symbol):
                     'usdt': usdt
                 }
 
-        elif active_order['symbol'] == symbol:  # Đã mua, kiểm tra bán
+        elif active_order['symbol'] == symbol:
             df_5m = await fetch_ohlcv(exchange, symbol, '5m', limit=100)
             if df_5m is None:
                 return
@@ -214,9 +214,9 @@ async def trade_coin(exchange, symbol):
                     amount = coin_balance
 
             should_sell = (
-                profit_percent >= 2 or  # Lãi 2-5%
-                profit_percent <= -10 or  # Cắt lỗ 10%
-                is_at_peak(df_5m)  # Dự đoán đạt đỉnh
+                profit_percent >= 2 or
+                profit_percent <= -10 or
+                is_at_peak(df_5m)
             )
 
             if should_sell:
@@ -251,7 +251,7 @@ async def trade_all_coins(exchange):
 async def runner():
     keep_alive()
     exchange = create_exchange()
-    await send_telegram("🤖 Bot giao dịch tự động đã khởi động! Chiến lược: Mua giá đáy, bán 2-5% hoặc dự đoán đỉnh")
+    await send_telegram("🤖 Bot giao dịch tự động đã khởi động! Chiến lược: Mua giá đáy, bán 2-5% hoặc đỉnh")
     
     schedule.every(1).minutes.do(lambda: asyncio.ensure_future(trade_all_coins(exchange)))
     schedule.every(10).minutes.do(lambda: asyncio.ensure_future(log_assets(exchange)))
