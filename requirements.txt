@@ -7,3 +7,4 @@ flask
 pytz
 aiohttp
 scikit-learn
+tensorflow
