@@ -24,7 +24,7 @@ SYMBOLS = ["DOGE/USDT", "PEPE/USDT"]
 
 # Bot configuration
 DAILY_PROFIT_TARGET = 5.0  # Mục tiêu 5% mỗi ngày
-RISK_PER_TRADE = 0.8  # Sử dụng 80% vốn mỗi giao dịch
+RISK_PER_TRADE = 0.5  # Giảm rủi ro giao dịch xuống 50%
 STOP_LOSS_PERCENT = -3.0  # Stop-loss -3%
 TAKE_PROFIT_PERCENT = 2.5  # Take-profit 2.5%
 STATE_FILE = "state.json"  # File lưu trạng thái
