@@ -258,28 +258,29 @@ async def log_assets(exchange):
         await send_telegram(f"❌ Lỗi log tài sản: {str(e)}")
         return None, None
 
+# Mở thêm lệnh nếu có lệnh lỗ
 async def trade_coin(exchange, symbol):
     global active_orders, lowest_prices, market_conditions
     try:
-        # Check market conditions
+        # Kiểm tra điều kiện thị trường
         if symbol not in market_conditions:
             market_conditions[symbol] = await check_market_conditions(exchange, symbol)
         if not market_conditions[symbol]:
             return
 
-        # Get lowest price in last 7 days
+        # Lấy giá thấp nhất trong 7 ngày
         if symbol not in lowest_prices:
             lowest_price = await get_lowest_price_7d(exchange, symbol)
             if lowest_price is None:
                 return
             lowest_prices[symbol] = lowest_price
 
-        # Fetch real-time data
+        # Lấy dữ liệu thời gian thực
         df_1m = await fetch_ohlcv(exchange, symbol, '1m', limit=50)
         if df_1m is None:
             return
 
-        # Avoid pump-and-dump
+        # Kiểm tra pump-and-dump
         if detect_pump_dump(df_1m):
             await send_telegram(f"⚠️ Phát hiện pump-and-dump trên {symbol}. Bỏ qua giao dịch.")
             return
@@ -293,7 +294,7 @@ async def trade_coin(exchange, symbol):
         hours_since_midnight = now.hour + now.minute / 60
         take_profit = TAKE_PROFIT_PERCENT if hours_since_midnight < 12 else 2.0  # 2.5% trước 12h, 2% sau 12h
 
-        # Buy logic
+        # Mở lệnh nếu chưa có
         if symbol not in active_orders:
             if is_near_lowest_price(current_price, lowest_prices[symbol], threshold=0.05) and \
                df_1m['rsi14'].iloc[-1] < 25 and \
@@ -331,12 +332,31 @@ async def trade_coin(exchange, symbol):
                     f"🟢 Mua {symbol}: {actual_amount:.4f} coin | Giá: {current_price:.4f} | "
                     f"Tổng: {trade_amount_usdt:.2f} USDT | SL: {stop_loss_price:.4f} | TP: {take_profit_price:.4f}"
                 )
-
-        # Sell logic
+        
+        # Nếu có lệnh thua, mở thêm lệnh để bù đắp lỗ
         elif symbol in active_orders:
             order = active_orders[symbol]
             profit_percent = ((current_price - order['buy_price']) / order['buy_price']) * 100
 
+            # Nếu có lệnh lỗ, mở thêm lệnh
+            if profit_percent < 0:  # Lệnh thua
+                await send_telegram(f"⚠️ Lệnh {symbol} bị lỗ. Tăng cường giao dịch để bù đắp.")
+                balance = await exchange.fetch_balance()
+                usdt = float(balance['total'].get('USDT', 0.0))
+                if usdt < 1.0:
+                    return
+
+                trade_amount_usdt = usdt * RISK_PER_TRADE
+                amount = trade_amount_usdt / current_price
+                if not await check_liquidity(exchange, symbol, amount):
+                    await send_telegram(f"⚠️ Thanh khoản thấp trên {symbol}. Bỏ qua giao dịch.")
+                    return
+
+                # Tăng cường giao dịch mở thêm lệnh để bù đắp lỗ
+                await exchange.create_market_buy_order(symbol, amount)
+                await send_telegram(f"🟢 Mở thêm lệnh để bù đắp lỗ cho {symbol}.")
+                
+            # Kiểm tra và đóng lệnh khi có lãi
             coin = symbol.split('/')[0]
             balance = await exchange.fetch_balance()
             coin_balance = float(balance['total'].get(coin, 0.0))
@@ -387,6 +407,7 @@ async def trade_all_coins(exchange):
 
     tasks = [trade_coin(exchange, symbol) for symbol in SYMBOLS]
     await asyncio.gather(*tasks)
+
 
 async def runner():
     global daily_start_capital_usd
