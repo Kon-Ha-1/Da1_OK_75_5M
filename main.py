@@ -97,11 +97,11 @@ def save_state():
 
 async def fetch_wallet_balance(exchange):
     try:
-        balance = await exchange.fetch_balance()
-        usdt = float(balance['total'].get('USDT', 0.0))
+        balance = await exchange.fetch_balance({'type': 'swap'})  # Fetch số dư ví futures
+        usdt = float(balance['USDT']['free'])  # Số USDT khả dụng trong ví futures
         return usdt
     except Exception as e:
-        logger.error(f"Lỗi lấy số dư: {e}")
+        logger.error(f"Lỗi lấy số dư futures: {e}")
         return None
 
 async def fetch_ohlcv(exchange, timeframe='5m', limit=100):
